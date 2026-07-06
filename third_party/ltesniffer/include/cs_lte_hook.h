@@ -28,4 +28,9 @@ void setLteConstRnti(uint16_t rnti);
 // Called by the decoder with equalized symbols (syms is a cf_t*/_Complex float*).
 void emitLteConst(uint16_t rnti, const float* iq, int nPairs);
 
+// ---- SIB (BCCH-DL-SCH) PDUs for cell-info decode ----
+typedef void (*LteSibFn)(void* user, const uint8_t* pdu, int len);
+void setLteSibCb(LteSibFn fn, void* user);
+void emitLteSib(const uint8_t* pdu, int len);
+
 } // namespace cellscope

@@ -51,4 +51,23 @@ void emitLteConst(uint16_t rnti, const float* iq, int nPairs)
     }
 }
 
+namespace {
+std::atomic<LteSibFn> g_sib_fn{nullptr};
+std::atomic<void*>    g_sib_user{nullptr};
+}
+
+void setLteSibCb(LteSibFn fn, void* user)
+{
+    g_sib_user.store(user);
+    g_sib_fn.store(fn);
+}
+
+void emitLteSib(const uint8_t* pdu, int len)
+{
+    LteSibFn fn = g_sib_fn.load();
+    if (fn && pdu && len > 0) {
+        fn(g_sib_user.load(), pdu, len);
+    }
+}
+
 } // namespace cellscope

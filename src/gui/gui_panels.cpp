@@ -1307,6 +1307,15 @@ void drawLte(App& app)
         ImGui::TextDisabled("| PCI %d  %d PRB  %d ports  SFN %d  %.3f MHz",
                             ci.pci, ci.nof_prb, ci.nof_ports, ci.sfn, ci.freq_mhz);
     }
+    if (ci.have_sib)
+    {
+        ImGui::TextColored(ImVec4(0.55f, 0.85f, 1.0f, 1.0f),
+                           "SIB1:  %s   PLMN %s   TAC 0x%X (%u)   Cell ID %llu   Band %d%s",
+                           ci.oper.empty() ? "(operator unknown)" : ci.oper.c_str(),
+                           ci.plmn.c_str(), ci.tac, ci.tac,
+                           (unsigned long long)ci.cell_id, ci.band,
+                           ci.barred ? "   [BARRED]" : "");
+    }
     ImGui::TextWrapped("%s", app.lteEngine.statusText().c_str());
 
     // ---- Cell-wide DL throughput + active-UE count over time ----

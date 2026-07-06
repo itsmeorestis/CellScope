@@ -615,6 +615,7 @@ void PDSCH_Decoder::write_pcap(std::string RNTI_name, uint8_t *pdu, uint32_t pdu
 	if (RNTI_name == "SI_RNTI")
 	{
 		pcapwriter->write_dl_sirnti(pdu, pdu_len_bytes, true, tti);
+		cellscope::emitLteSib(pdu, (int)pdu_len_bytes); // -> CellScope SIB decode
 	}
 	else if (RNTI_name == "P_RNTI")
 	{

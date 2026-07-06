@@ -19,6 +19,7 @@
 #include "cs_lte_hook.h"
 #include "falcon/util/RNTIManager.h"
 #include "falcon/phy/falcon_phch/falcon_dci.h"
+#include "srsran/asn1/rrc/bcch_msg.h"
 #undef I
 
 #include <atomic>
@@ -407,6 +408,12 @@ struct LteEngine::Impl {
         static_cast<Impl*>(user)->on_constellation(rnti, iq, nPairs);
     }
 
+    void on_sib(const uint8_t* pdu, int len);
+    static void sib_cb(void* user, const uint8_t* pdu, int len)
+    {
+        static_cast<Impl*>(user)->on_sib(pdu, len);
+    }
+
     // Once/sec: compute per-UE bit rates + push a cell-wide history point.
     void update_rates()
     {
@@ -723,6 +730,78 @@ struct LteEngine::Impl::Consumer : public SubframeInfoConsumer {
     }
 };
 
+// ---- SIB1 operator lookup (best-effort; PLMN is always shown regardless) ----
+static std::string operator_name(int mcc, int mnc)
+{
+    if (mcc == 310 || mcc == 311 || mcc == 312 || mcc == 313 || mcc == 316) { // USA
+        switch (mnc) {
+            case 260: case 160: case 200: case 210: case 220: case 230:
+            case 240: case 250: case 270: case 310: case 490: case 660: case 800:
+                return "T-Mobile US";
+            case 410: case 150: case 170: case 380: case 560: case 680: case 70:
+                return "AT&T";
+            case 4: case 10: case 12: case 13: case 480:
+                return "Verizon";
+            case 120: return "Sprint";
+            default:  return "USA";
+        }
+    }
+    if (mcc == 234 || mcc == 235) return "UK";
+    if (mcc == 262) return "Germany";
+    if (mcc == 302) return "Canada";
+    if (mcc == 505) return "Australia";
+    return "";
+}
+
+void LteEngine::Impl::on_sib(const uint8_t* pdu, int len)
+{
+    {
+        std::lock_guard<std::mutex> lk(cell_mtx);
+        if (cell_info.have_sib) return; // already have it
+    }
+    asn1::rrc::bcch_dl_sch_msg_s msg;
+    asn1::cbit_ref              bref(pdu, len);
+    if (msg.unpack(bref) != asn1::SRSASN_SUCCESS) return;
+    if (msg.msg.type().value != asn1::rrc::bcch_dl_sch_msg_type_c::types_opts::c1) return;
+    if (msg.msg.c1().type().value != asn1::rrc::bcch_dl_sch_msg_type_c::c1_c_::types::sib_type1) return;
+
+    auto& sib1 = msg.msg.c1().sib_type1();
+    auto& cari = sib1.cell_access_related_info;
+
+    int         mcc = -1, mnc = -1, mnc_dig = 0;
+    std::string plmn;
+    if (cari.plmn_id_list.size() > 0) {
+        auto& p = cari.plmn_id_list[0].plmn_id;
+        if (p.mcc_present) {
+            mcc = p.mcc[0] * 100 + p.mcc[1] * 10 + p.mcc[2];
+        }
+        mnc_dig = (int)p.mnc.size();
+        int m   = 0;
+        for (uint32_t i = 0; i < p.mnc.size(); ++i) m = m * 10 + p.mnc[i];
+        mnc = m;
+        char buf[24];
+        if (p.mcc_present) std::snprintf(buf, sizeof(buf), "%03d-%0*d", mcc, mnc_dig, mnc);
+        else               std::snprintf(buf, sizeof(buf), "???-%0*d", mnc_dig, mnc);
+        plmn = buf;
+    }
+    uint32_t tac    = (uint32_t)cari.tac.to_number();
+    uint64_t cid    = (uint64_t)cari.cell_id.to_number();
+    bool     barred = (std::strcmp(cari.cell_barred.to_string(), "barred") == 0);
+    int      band   = (int)sib1.freq_band_ind;
+    std::string oper = operator_name(mcc, mnc);
+
+    std::lock_guard<std::mutex> lk(cell_mtx);
+    cell_info.have_sib = true;
+    cell_info.plmn     = plmn;
+    cell_info.oper     = oper;
+    cell_info.tac      = tac;
+    cell_info.cell_id  = cid;
+    cell_info.band     = band;
+    cell_info.barred   = barred;
+    diagLog("SIB1: plmn=" + plmn + " oper=" + oper + " tac=" + std::to_string(tac) +
+            " ecgi=" + std::to_string(cid) + " band=" + std::to_string(band));
+}
+
 // ---- RNTI manager seeding (mirrors LTESniffer_Core) ----
 static void setup_rnti_manager(RNTIManager& rm)
 {
@@ -789,6 +868,7 @@ void LteEngine::Impl::run_decode(CellInfo& ci)
     // Route decoded identities/messages from the PDSCH decoder to on_identity().
     cellscope::setLteEventCb(&Impl::identity_cb, this);
     cellscope::setLteConstCb(&Impl::constellation_cb, this);
+    cellscope::setLteSibCb(&Impl::sib_cb, this);
 
     if (!phy.setCell(cell)) {
         set_status("decode: setCell failed");
@@ -915,6 +995,7 @@ void LteEngine::Impl::run_decode(CellInfo& ci)
     phy.joinPending();
     cellscope::setLteEventCb(nullptr, nullptr); // workers are done emitting
     cellscope::setLteConstCb(nullptr, nullptr);
+    cellscope::setLteSibCb(nullptr, nullptr);
     srsran_ue_sync_free(&ue_sync);
     srsran_ue_mib_free(&ue_mib);
     pcapwriter.close();

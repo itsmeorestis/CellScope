@@ -32,6 +32,14 @@ struct CellInfo {
     float  peak      = 0.0f; // correlation peak (search confidence)
     double freq_mhz  = 0.0;  // center frequency it was found at
     int    sfn       = -1;   // last decoded system frame number
+    // ---- from SIB1 (broadcast, plaintext) ----
+    bool        have_sib = false;
+    std::string plmn;        // "MCC-MNC", e.g. "310-260"
+    std::string oper;        // carrier name if known
+    uint32_t    tac     = 0; // tracking area code
+    uint64_t    cell_id = 0; // 28-bit E-UTRAN cell identity
+    int         band    = 0; // frequency band indicator
+    bool        barred  = false;
 };
 
 // Per-UE (per-RNTI) running statistics — the "who is on the cell / who uses
