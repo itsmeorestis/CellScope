@@ -1,0 +1,12 @@
+C:/Users/SarahRose/PycharmProjects/CellScope/third_party/lte/build/CMakeFiles/srsran_phy.dir
+C:/Users/SarahRose/PycharmProjects/CellScope/third_party/lte/build/CMakeFiles/falcon_phy.dir
+C:/Users/SarahRose/PycharmProjects/CellScope/third_party/lte/build/CMakeFiles/srslog.dir
+C:/Users/SarahRose/PycharmProjects/CellScope/third_party/lte/build/CMakeFiles/srsran_common.dir
+C:/Users/SarahRose/PycharmProjects/CellScope/third_party/lte/build/CMakeFiles/srsran_mac.dir
+C:/Users/SarahRose/PycharmProjects/CellScope/third_party/lte/build/CMakeFiles/asn1_utils.dir
+C:/Users/SarahRose/PycharmProjects/CellScope/third_party/lte/build/CMakeFiles/srsran_asn1.dir
+C:/Users/SarahRose/PycharmProjects/CellScope/third_party/lte/build/CMakeFiles/rrc_asn1.dir
+C:/Users/SarahRose/PycharmProjects/CellScope/third_party/lte/build/CMakeFiles/ltesniffer_core.dir
+C:/Users/SarahRose/PycharmProjects/CellScope/third_party/lte/build/CMakeFiles/lte_spike.dir
+C:/Users/SarahRose/PycharmProjects/CellScope/third_party/lte/build/CMakeFiles/edit_cache.dir
+C:/Users/SarahRose/PycharmProjects/CellScope/third_party/lte/build/CMakeFiles/rebuild_cache.dir
