@@ -1,13 +1,19 @@
 #pragma once
-// CellScope: central force-included compat shim for building vendored srsRAN /
-// FALCON C/C++ sources under MinGW-w64. Keep this minimal and portable.
+// CellScope: central force-included compat shim for building the vendored
+// srsRAN / FALCON C/C++ sources. The MinGW-w64 (Windows) build needs a set of
+// POSIX/C11 shims that the MinGW CRT lacks; a native Linux/glibc toolchain
+// already provides all of these, so the Windows-only shims are guarded behind
+// _WIN32. The handful of genuinely portable fix-ups (e.g. the bundled fmt's
+// missing <array> include) are applied on every platform.
 
 // C11 <threads.h> time base constant is not always visible in MinGW's <time.h>
-// even though timespec_get() is declared.
+// even though timespec_get() is declared. Harmless elsewhere (guarded ifndef).
 #include <time.h>
 #ifndef TIME_UTC
 #define TIME_UTC 1
 #endif
+
+#if defined(_WIN32)
 
 // MinGW's CRT has neither posix_memalign nor C11 aligned_alloc, and srsRAN
 // frees these buffers with plain free() (so _aligned_malloc is unusable).
@@ -104,7 +110,6 @@ static inline int pthread_setaffinity_np(pthread_t t, size_t sz, const cpu_set_t
 
 // C++ gaps for MinGW when building srsRAN's bundled fmt / srslog.
 #ifdef __cplusplus
-#include <array>   // bundled fmt/core.h uses std::array without including it
 #include <ctime>
 #ifndef CS_HAVE_LOCALTIME_R
 #define CS_HAVE_LOCALTIME_R 1
@@ -125,4 +130,13 @@ static inline struct tm* gmtime_r(const time_t* t, struct tm* out)
 }
 #endif
 #endif
+#endif
+
+#endif // _WIN32
+
+// Portable fix-up (all platforms): srsRAN's bundled fmt/core.h uses std::array
+// without including <array>. GCC's libstdc++ only forward-declares it via other
+// headers, so include it up front. Guarded to C++ so C TUs are unaffected.
+#ifdef __cplusplus
+#include <array>
 #endif

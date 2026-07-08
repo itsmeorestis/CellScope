@@ -38,10 +38,31 @@ add_definitions(-D_GNU_SOURCE -DSRSRAN_STATIC)
 # Downlink-only build: guards LTESniffer's uplink paths (PUSCH/enb_ul) so we
 # don't need to compile the uplink + srsran_rlc + phy/enb cascade.
 add_definitions(-DCELLSCOPE_DL_ONLY)
-# Force-include a central MinGW compat shim into every vendored TU.
+# The compat shims (force-included cs_compat.h + the POSIX shim headers under
+# compat/) exist solely to make the vendored, originally-Linux srsRAN/FALCON
+# code build under MinGW-w64. On a real Linux host the native headers already
+# provide these facilities, so applying the shims there would shadow (and
+# break) the system headers. Only enable them on Windows.
+# Force-include the central compat shim into every vendored TU. It carries the
+# MinGW-only POSIX/C11 shims (guarded internally by _WIN32) plus a portable
+# fix-up for the bundled fmt's missing <array> include.
 add_compile_options(-include "${CMAKE_CURRENT_SOURCE_DIR}/compat/cs_compat.h")
-# Make the POSIX-compat shim headers (syslog.h, sys/socket.h, pwd.h, ...) visible.
-include_directories(BEFORE "${CMAKE_CURRENT_SOURCE_DIR}/compat")
+if(WIN32)
+  # Make the POSIX-compat shim headers (syslog.h, sys/socket.h, pwd.h, ...) visible.
+  include_directories(BEFORE "${CMAKE_CURRENT_SOURCE_DIR}/compat")
+  # Consumers that pull vendored headers also need the shim dir. Kept empty on
+  # Linux so the stub headers never shadow the real system ones.
+  set(CS_COMPAT_INC "${CMAKE_CURRENT_SOURCE_DIR}/compat")
+else()
+  set(CS_COMPAT_INC "")
+endif()
+
+# pthread implementation: MinGW ships it as "winpthread", glibc as "pthread".
+if(WIN32)
+  set(CS_PTHREAD_LIB winpthread)
+else()
+  set(CS_PTHREAD_LIB pthread)
+endif()
 
 # ---------------------------------------------------------------------------
 # srsran_phy
@@ -62,9 +83,9 @@ set(SRSRAN_PHY_SRCS ${_filtered})
 add_library(srsran_phy STATIC ${SRSRAN_PHY_SRCS})
 target_include_directories(srsran_phy PUBLIC
   "${SRSRAN_DIR}/include"
-  "${CMAKE_CURRENT_SOURCE_DIR}/compat"
+  ${CS_COMPAT_INC}
   ${FFTW3F_INCLUDE_DIRS})
-target_link_libraries(srsran_phy PUBLIC ${FFTW3F_LIBRARIES} winpthread m)
+target_link_libraries(srsran_phy PUBLIC ${FFTW3F_LIBRARIES} ${CS_PTHREAD_LIB} m)
 target_compile_options(srsran_phy PRIVATE -march=native)
 
 # ---------------------------------------------------------------------------
@@ -124,8 +145,8 @@ set(SRSRAN_COMMON_SRCS
   "${SRSRAN_DIR}/support/emergency_handlers.cc")
 add_library(srsran_common STATIC ${SRSRAN_COMMON_SRCS})
 target_include_directories(srsran_common PUBLIC
-  "${SRSRAN_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/compat")
-target_link_libraries(srsran_common PUBLIC srslog srsran_phy winpthread)
+  "${SRSRAN_DIR}/include" ${CS_COMPAT_INC})
+target_link_libraries(srsran_common PUBLIC srslog srsran_phy ${CS_PTHREAD_LIB})
 
 # ---------------------------------------------------------------------------
 # srsran_mac (LTE MAC PDU parsing -> human-readable MAC. Excludes NR.)

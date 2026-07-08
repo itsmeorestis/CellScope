@@ -1,5 +1,6 @@
 #include "lte_diag.h"
 
+#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -7,13 +8,22 @@
 #include <windows.h>
 #include <dbghelp.h>
 #include <psapi.h>
+#else
+#include <csignal>
+#include <ctime>
+#include <execinfo.h>
+#include <unistd.h>
+#endif
 
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <mutex>
 #include <stdexcept>
 
 namespace cellscope::lte {
+
+#if defined(_WIN32)
 
 namespace {
 std::mutex g_log_mtx;
@@ -139,5 +149,112 @@ void diagLog(const std::string& msg)
         std::fflush(g_log);
     }
 }
+
+#else // ---------------------------------------------------------------- POSIX
+
+namespace {
+std::mutex g_log_mtx;
+FILE*      g_log = nullptr;
+
+void ensure_open_locked()
+{
+    if (!g_log) {
+        g_log = std::fopen("cellscope_lte.log", "a");
+    }
+}
+
+void log_stack_locked()
+{
+    void* frames[40];
+    int   n = backtrace(frames, 40);
+    // backtrace_symbols() allocates; safe here because the crash/terminate
+    // handlers log then abort (best-effort diagnostics, not signal-async-safe).
+    char** syms = backtrace_symbols(frames, n);
+    for (int i = 0; i < n; ++i) {
+        if (syms && syms[i]) {
+            std::fprintf(g_log, "    #%02d %s\n", i, syms[i]);
+        } else {
+            std::fprintf(g_log, "    #%02d %p\n", i, frames[i]);
+        }
+    }
+    std::free(syms);
+}
+
+void crash_handler(int sig)
+{
+    std::lock_guard<std::mutex> lk(g_log_mtx);
+    ensure_open_locked();
+    if (g_log) {
+        std::fprintf(g_log, "\n*** FATAL SIGNAL %d ***\n", sig);
+        log_stack_locked();
+        std::fflush(g_log);
+    }
+    std::signal(sig, SIG_DFL);
+    std::raise(sig);
+}
+
+void on_terminate()
+{
+    {
+        std::lock_guard<std::mutex> lk(g_log_mtx);
+        ensure_open_locked();
+        if (g_log) {
+            std::fprintf(g_log, "\n*** std::terminate (uncaught exception in a thread) ***\n");
+            std::fflush(g_log);
+        }
+    }
+    try {
+        std::exception_ptr e = std::current_exception();
+        if (e) {
+            std::rethrow_exception(e);
+        }
+    } catch (const std::exception& ex) {
+        diagLog(std::string("  what(): ") + ex.what());
+    } catch (...) {
+        diagLog("  unknown (non-std) exception");
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_log_mtx);
+        if (g_log) {
+            log_stack_locked();
+            std::fflush(g_log);
+        }
+    }
+    std::abort();
+}
+} // namespace
+
+void diagInstallCrashHandler()
+{
+    static bool installed = false;
+    std::lock_guard<std::mutex> lk(g_log_mtx);
+    if (installed) {
+        return;
+    }
+    installed = true;
+    std::signal(SIGSEGV, crash_handler);
+    std::signal(SIGABRT, crash_handler);
+    std::signal(SIGFPE, crash_handler);
+    std::signal(SIGILL, crash_handler);
+    std::signal(SIGBUS, crash_handler);
+    std::set_terminate(on_terminate);
+}
+
+void diagLog(const std::string& msg)
+{
+    std::lock_guard<std::mutex> lk(g_log_mtx);
+    ensure_open_locked();
+    if (g_log) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        struct tm tmv;
+        localtime_r(&ts.tv_sec, &tmv);
+        std::fprintf(g_log, "[%02d:%02d:%02d.%03d] %s\n", tmv.tm_hour, tmv.tm_min, tmv.tm_sec,
+                     (int)(ts.tv_nsec / 1000000), msg.c_str());
+        std::fflush(g_log);
+    }
+}
+
+#endif // _WIN32
 
 } // namespace cellscope::lte
