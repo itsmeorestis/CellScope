@@ -71,7 +71,7 @@ private:
     double bandwidth_ = 0.0;     // 0 => track sample rate
     double gainDb_ = 40.0;       // <0 => AGC
     double ppm_ = 0.0;
-    std::string antenna_ = "RX2";
+    std::string antenna_ = "RX2"; // RX1, RX2, TX/RX, TX/RX2
     std::string fpgaPath_ = "libresdr_b210.bin";
 
     std::atomic<bool> dcBlock_{true};

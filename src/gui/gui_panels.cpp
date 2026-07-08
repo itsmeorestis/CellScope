@@ -48,12 +48,12 @@ static void beginStartActive(App& app)
             app.startThread.join();
 
         // Apply config up front so the worker's open() uses the right settings.
-        static const char* kLibreAntennas[] = {"RX2", "TX/RX"};
+        static const char* kLibreAntennas[] = {"RX1", "RX2", "TX/RX", "TX/RX2"};
         app.libre.setFpgaImage(app.libreFpgaPath);
         app.libre.setSampleRate(app.libreSampleRateMHz * 1e6);
         app.libre.setCenterFreq(app.centerFreqMHz * 1e6);
         app.libre.setGain((double)app.libreGainDb);
-        app.libre.setAntenna(kLibreAntennas[app.libreAntennaIdx & 1]);
+        app.libre.setAntenna(kLibreAntennas[app.libreAntennaIdx]);
         app.libre.setDcBlock(app.dcBlock);
 
         app.status = "Initializing LibreSDR...";
@@ -546,9 +546,9 @@ void drawControls(App& app)
             if (running)
                 app.libre.setSampleRate(app.libreSampleRateMHz * 1e6);
         }
-        const char* libreAnts[] = {"RX2", "TX/RX"};
+        const char* libreAnts[] = {"RX1", "RX2", "TX/RX", "TX/RX2"};
         ImGui::BeginDisabled(running);
-        ImGui::Combo("Antenna", &app.libreAntennaIdx, libreAnts, 2);
+        ImGui::Combo("Antenna", &app.libreAntennaIdx, libreAnts, 4);
         ImGui::EndDisabled();
         if (ImGui::SliderFloat("Gain (dB)", &app.libreGainDb, 0.0f, 76.0f, "%.1f"))
         {
