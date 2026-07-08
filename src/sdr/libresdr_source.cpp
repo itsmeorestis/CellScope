@@ -137,6 +137,41 @@ bool LibreSdrSource::prepare(int deviceIndex, std::string& err)
     return true;
 }
 
+std::vector<std::string> LibreSdrSource::rxAntennas()
+{
+    std::vector<std::string> out;
+    // If we already have a prepared/open device, query it directly.
+    if (impl_ && impl_->usrp)
+    {
+        try { out = impl_->usrp->get_rx_antennas(); }
+        catch (const std::exception&) {}
+        return out;
+    }
+    // Attempt a lightweight probe without a full open. Only works when no
+    // session is active, but that's fine — this is always called from the GUI
+    // thread before the prepare() worker starts.
+    try
+    {
+        uhd::device_addr_t hint;
+        hint["type"] = "b200";
+        uhd::device_addrs_t found = uhd::device::find(hint);
+        if (!found.empty())
+        {
+            // Probe the first device just to read the antenna list.
+            uhd::device_addr_t args;
+            args["type"] = "b200";
+            if (found[0].has_key("serial"))
+                args["serial"] = found[0]["serial"];
+            auto probe = uhd::usrp::multi_usrp::make(args);
+            out = probe->get_rx_antennas();
+        }
+    }
+    catch (const std::exception&) {}
+    if (out.empty())
+        out = {"RX2", "TX/RX"}; // sane fallback for standard B210
+    return out;
+}
+
 bool LibreSdrSource::start(int deviceIndex, SdrSampleCb cb, std::string& err)
 {
     if (running_.load())

@@ -47,13 +47,25 @@ static void beginStartActive(App& app)
         if (app.startThread.joinable())
             app.startThread.join();
 
+        // Query available antennas from the hardware (lightweight probe)
+        // so the antenna picker in the device panel shows the real list.
+        std::vector<std::string> ants = app.libre.rxAntennas();
+        if (!ants.empty())
+        {
+            // Clamp the saved antenna name to one that actually exists.
+            bool found = false;
+            for (auto& a : ants)
+                if (a == std::string(app.libreAntenna)) { found = true; break; }
+            if (!found)
+                std::strncpy(app.libreAntenna, ants[0].c_str(), sizeof(app.libreAntenna) - 1);
+        }
+
         // Apply config up front so the worker's open() uses the right settings.
-        static const char* kLibreAntennas[] = {"RX1", "RX2", "TX/RX", "TX/RX2"};
         app.libre.setFpgaImage(app.libreFpgaPath);
         app.libre.setSampleRate(app.libreSampleRateMHz * 1e6);
         app.libre.setCenterFreq(app.centerFreqMHz * 1e6);
         app.libre.setGain((double)app.libreGainDb);
-        app.libre.setAntenna(kLibreAntennas[app.libreAntennaIdx]);
+        app.libre.setAntenna(app.libreAntenna);
         app.libre.setDcBlock(app.dcBlock);
 
         app.status = "Initializing LibreSDR...";
@@ -546,9 +558,25 @@ void drawControls(App& app)
             if (running)
                 app.libre.setSampleRate(app.libreSampleRateMHz * 1e6);
         }
-        const char* libreAnts[] = {"RX1", "RX2", "TX/RX", "TX/RX2"};
+        std::vector<std::string> libreAnts = app.libre.rxAntennas();
+        if (libreAnts.empty())
+            libreAnts = {"RX2", "TX/RX"}; // fallback
         ImGui::BeginDisabled(running);
-        ImGui::Combo("Antenna", &app.libreAntennaIdx, libreAnts, 4);
+        if (ImGui::BeginCombo("Antenna", app.libreAntenna))
+        {
+            for (int i = 0; i < (int)libreAnts.size(); ++i)
+            {
+                bool sel = (libreAnts[i] == std::string(app.libreAntenna));
+                if (ImGui::Selectable(libreAnts[i].c_str(), sel))
+                {
+                    std::strncpy(app.libreAntenna, libreAnts[i].c_str(), sizeof(app.libreAntenna) - 1);
+                    app.libreAntenna[sizeof(app.libreAntenna) - 1] = 0;
+                    if (running)
+                        app.libre.setAntenna(app.libreAntenna);
+                }
+            }
+            ImGui::EndCombo();
+        }
         ImGui::EndDisabled();
         if (ImGui::SliderFloat("Gain (dB)", &app.libreGainDb, 0.0f, 76.0f, "%.1f"))
         {

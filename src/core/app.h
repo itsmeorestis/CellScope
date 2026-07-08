@@ -99,7 +99,7 @@ struct App
 #ifdef HAS_LIBRESDR
     double libreSampleRateMHz = 4.0;
     float  libreGainDb = 40.0f;   // B210 RX gain 0..76 dB
-    int    libreAntennaIdx = 0;   // 0=RX2, 1=TX/RX
+    char   libreAntenna[32] = "RX2";   // queried from UHD at start
     char   libreFpgaPath[512] = "libresdr_b210.bin";
 #endif
 

@@ -53,6 +53,9 @@ public:
     // prepare() already ran, so streaming can begin instantly on the GUI thread.
     bool prepare(int deviceIndex, std::string& err);
 
+    // Query the device (or the last-prepared device) for its RX antenna list.
+    std::vector<std::string> rxAntennas();
+
 private:
     void rxLoop();
 
