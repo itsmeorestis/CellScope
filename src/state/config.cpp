@@ -52,6 +52,10 @@ void cfgWriteAll(App& app, ImGuiTextBuffer* buf)
     WI(airspyLnaGain); WI(airspyMixerGain); WI(airspyVgaGain);
     WI(airspyLnaAgc); WI(airspyMixerAgc); WI(airspyBias);
 #endif
+#ifdef HAS_LIBRESDR
+    WD(libreSampleRateMHz); WF(libreGainDb); WI(libreAntennaIdx);
+    WS(libreFpgaPath);
+#endif
     WI(deviceIndexB); WD(centerFreqMHzB); WI(sampleRateIdxB);
     WI(autoGainB); WF(gainDbB); WI(biasTeeB); WF(ppmB);
     WI(saveDecoders);
@@ -106,6 +110,10 @@ void cfgReadLine(App& app, const char* line)
     RI(airspySampleRateIdx); RI(airspyGainMode); RI(airspySenseGain); RI(airspyLinearGain);
     RI(airspyLnaGain); RI(airspyMixerGain); RI(airspyVgaGain);
     RB(airspyLnaAgc); RB(airspyMixerAgc); RB(airspyBias);
+#endif
+#ifdef HAS_LIBRESDR
+    RD(libreSampleRateMHz); RF(libreGainDb); RI(libreAntennaIdx);
+    RS(libreFpgaPath);
 #endif
     RI(deviceIndexB); RD(centerFreqMHzB); RI(sampleRateIdxB);
     RB(autoGainB); RF(gainDbB); RB(biasTeeB); RF(ppmB);

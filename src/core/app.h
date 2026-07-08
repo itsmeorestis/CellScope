@@ -9,6 +9,9 @@
 #ifdef HAS_AIRSPY
 #include "sdr/airspy_source.h"
 #endif
+#ifdef HAS_LIBRESDR
+#include "sdr/libresdr_source.h"
+#endif
 #include "sdr/wav_file_source.h"
 #include "sdr/sdrpp_server_source.h"
 #include "sdr/iq_recorder.h"
@@ -23,6 +26,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <atomic>
+#include <thread>
 #ifdef HAS_LTE
 #include <set>
 #endif
@@ -56,8 +61,11 @@ struct App
 #ifdef HAS_AIRSPY
     AirspySource    airspy;
 #endif
+#ifdef HAS_LIBRESDR
+    LibreSdrSource  libre;
+#endif
     SdrSource*      active = &sdr;
-    int  sourceMode = 0; // 0=RTL, 1=WAV, 2=SDR++ Server, 3=HackRF, 4=Dual RTL, 5=Airspy
+    int  sourceMode = 0; // 0=RTL, 1=WAV, 2=SDR++ Server, 3=HackRF, 4=Dual RTL, 5=Airspy, 6=LibreSDR
     char wavPath[512] = "";
     bool wavLoop = true;
     char serverHost[128] = "localhost";
@@ -85,6 +93,14 @@ struct App
     bool   airspyLnaAgc = false;
     bool   airspyMixerAgc = false;
     bool   airspyBias = false;
+#endif
+
+    // LibreSDR (USRP B210 clone, driven via UHD with our custom FPGA image)
+#ifdef HAS_LIBRESDR
+    double libreSampleRateMHz = 4.0;
+    float  libreGainDb = 40.0f;   // B210 RX gain 0..76 dB
+    int    libreAntennaIdx = 0;   // 0=RX2, 1=TX/RX
+    char   libreFpgaPath[512] = "libresdr_b210.bin";
 #endif
 
     SpectrumView     viewA;
@@ -186,6 +202,16 @@ struct App
     int  fontSize = 17;
 
     double lastConfiguredFs = 0.0;
+
+    // Async source startup (used for slow backends like LibreSDR/UHD, whose
+    // multi_usrp::make() blocks for several seconds loading firmware + FPGA).
+    // The worker only opens the device (prepare()); when it signals startReady
+    // the GUI thread finalizes (startActive) so no shared state is touched off
+    // the render thread.
+    std::atomic<bool> starting{false};
+    std::atomic<bool> startReady{false};
+    std::string       startErr;
+    std::thread       startThread;
 };
 
 // ---- shared constants ----

@@ -152,6 +152,20 @@ int main(int, char**)
     {
         glfwPollEvents();
 
+        // Finalize an async source start (LibreSDR/UHD) once the worker thread
+        // has opened the device. Done on the GUI thread so startActive() only
+        // touches shared state (rings, decoders, active source) from here.
+        if (app.startReady.exchange(false))
+        {
+            if (app.startThread.joinable())
+                app.startThread.join();
+            if (app.startErr.empty())
+                startActive(app); // device already prepared -> returns quickly
+            else
+                app.status = "Error: " + app.startErr;
+            app.starting.store(false);
+        }
+
         // Apply the built-in default dock layout (fresh run / version bump /
         // Reset Layout). Done between frames as ImGui prefers.
         if (app.forceDefaultLayout)
@@ -229,6 +243,9 @@ int main(int, char**)
 
     // Persist settings + dock layout to cellscope.ini before shutting down.
     ImGui::SaveIniSettingsToDisk(io.IniFilename);
+
+    if (app.startThread.joinable())
+        app.startThread.join();
 
     app.decoders.stop();
     app.decodersB.stop();

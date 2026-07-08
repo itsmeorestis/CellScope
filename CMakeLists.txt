@@ -50,6 +50,26 @@ if(AIRSPY_LIBRARIES)
     message(STATUS "Airspy link library found: ${AIRSPY_LIBRARIES}")
 endif()
 
+# LibreSDR (USRP B210 clone) via UHD. Linux-only: UHD loads our custom FPGA
+# bitstream (libresdr_b210.bin) onto the device by passing fpga=<path> in the
+# device args at make() time. Prefer pkg-config (uses the /usr/local UHD install
+# and avoids the imported-target quirk in some UHDConfig.cmake versions), then
+# fall back to the CMake config package.
+set(LIBRESDR_FOUND FALSE)
+if(NOT WIN32)
+    set(UHD_FOUND FALSE)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(UHD QUIET uhd)
+    endif()
+    if(NOT UHD_FOUND)
+        find_package(UHD CONFIG QUIET)
+    endif()
+    if(UHD_FOUND)
+        message(STATUS "UHD found: ${UHD_VERSION}")
+        set(LIBRESDR_FOUND TRUE)
+    endif()
+endif()
+
 set(IMGUI_DIR   ${CMAKE_SOURCE_DIR}/third_party/imgui)
 set(IMPLOT_DIR  ${CMAKE_SOURCE_DIR}/third_party/implot)
 
@@ -133,12 +153,21 @@ if(AIRSPY_FOUND)
     target_compile_definitions(CellScope PRIVATE HAS_AIRSPY=1)
     target_include_directories(CellScope PRIVATE ${AIRSPY_INCLUDE_DIRS})
 endif()
+if(LIBRESDR_FOUND)
+    target_sources(CellScope PRIVATE src/sdr/libresdr_source.cpp)
+    target_compile_definitions(CellScope PRIVATE HAS_LIBRESDR=1)
+    target_include_directories(CellScope PRIVATE ${UHD_INCLUDE_DIRS})
+    target_link_directories(CellScope PRIVATE ${UHD_LIBRARY_DIRS})
+endif()
 find_library(ZSTD_LIBRARIES NAMES zstd libzstd REQUIRED)
 find_library(ZLIB_LIB NAMES z libz zlib REQUIRED)
 
 target_link_libraries(CellScope PRIVATE imgui ${ZLIB_LIB} ${RTLSDR_LIBRARIES} ${HACKRF_LIBRARIES} ${ZSTD_LIBRARIES})
 if(AIRSPY_FOUND)
     target_link_libraries(CellScope PRIVATE ${AIRSPY_LIBRARIES})
+endif()
+if(LIBRESDR_FOUND)
+    target_link_libraries(CellScope PRIVATE ${UHD_LIBRARIES})
 endif()
 if(HAS_LTE)
     target_link_libraries(CellScope PRIVATE cellscope_lte)

@@ -12,6 +12,7 @@
 #include "version.h"
 #include "gui/waterfall.h"
 #include <algorithm>
+#include <cfloat>
 #include <chrono>
 #include <cmath>
 #include <complex>
@@ -32,31 +33,105 @@
 #include <shellapi.h>
 #endif
 
+// Kick off source startup. Most backends open instantly, but LibreSDR/UHD
+// blocks for several seconds in multi_usrp::make() (firmware + FPGA upload), so
+// open the device on a worker thread (prepare()) and surface an animated
+// "Initializing..." bar. When the worker finishes, the main loop finalizes the
+// start on the GUI thread (startActive), so shared app state is only ever
+// touched from the render thread.
+static void beginStartActive(App& app)
+{
+#ifdef HAS_LIBRESDR
+    if (app.sourceMode == 6)
+    {
+        if (app.startThread.joinable())
+            app.startThread.join();
+
+        // Apply config up front so the worker's open() uses the right settings.
+        static const char* kLibreAntennas[] = {"RX2", "TX/RX"};
+        app.libre.setFpgaImage(app.libreFpgaPath);
+        app.libre.setSampleRate(app.libreSampleRateMHz * 1e6);
+        app.libre.setCenterFreq(app.centerFreqMHz * 1e6);
+        app.libre.setGain((double)app.libreGainDb);
+        app.libre.setAntenna(kLibreAntennas[app.libreAntennaIdx & 1]);
+        app.libre.setDcBlock(app.dcBlock);
+
+        app.status = "Initializing LibreSDR...";
+        app.startErr.clear();
+        app.startReady.store(false);
+        app.starting.store(true);
+        app.startThread = std::thread([&app]() {
+            std::string err;
+            bool ok = app.libre.prepare(app.deviceIndex, err);
+            app.startErr = ok ? std::string()
+                              : (err.empty() ? std::string("open failed") : err);
+            app.startReady.store(true);
+        });
+        return;
+    }
+#endif
+    startActive(app);
+}
+
 void drawControls(App& app)
 {
     ImGui::Begin((std::string(_L("Control")) + "###Control").c_str());
 
     bool running = app.active->running();
+    bool starting = app.starting.load();
 
-    ImGui::BeginDisabled(running);
+    ImGui::BeginDisabled(running || starting);
+    {
+        // Explicit (label, mode) pairs so indices stay stable regardless of
+        // which optional backends are compiled in.
+        struct SrcOpt { const char* label; int mode; };
+        static const SrcOpt opts[] = {
+            {"RTL-SDR", 0}, {"WAV file", 1}, {"SDR++ Server", 2},
+            {"HackRF", 3}, {"Dual RTL", 4},
 #ifdef HAS_AIRSPY
-    const char* modes[] = {"RTL-SDR", "WAV file", "SDR++ Server", "HackRF", "Dual RTL", "Airspy"};
-    ImGui::Combo(_L("Source"), &app.sourceMode, modes, 6);
-#else
-    const char* modes[] = {"RTL-SDR", "WAV file", "SDR++ Server", "HackRF", "Dual RTL"};
-    ImGui::Combo(_L("Source"), &app.sourceMode, modes, 5);
+            {"Airspy", 5},
 #endif
+#ifdef HAS_LIBRESDR
+            {"LibreSDR", 6},
+#endif
+        };
+        const int nOpts = (int)(sizeof(opts) / sizeof(opts[0]));
+        const char* cur = "RTL-SDR";
+        for (int i = 0; i < nOpts; ++i)
+            if (opts[i].mode == app.sourceMode) cur = opts[i].label;
+        if (ImGui::BeginCombo(_L("Source"), cur))
+        {
+            for (int i = 0; i < nOpts; ++i)
+                if (ImGui::Selectable(opts[i].label, opts[i].mode == app.sourceMode))
+                    app.sourceMode = opts[i].mode;
+            ImGui::EndCombo();
+        }
+    }
     ImGui::EndDisabled();
 
     ImGui::Separator();
 
-    if (!running)
+    if (starting)
+    {
+        ImGui::BeginDisabled(true);
+        ImGui::Button(_L("Start"), ImVec2(120, 0));
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "%s", _L("Initializing LibreSDR"));
+        // Indeterminate animated bar: UHD's multi_usrp::make() gives no progress,
+        // so a negative fraction drives ImGui's scrolling "busy" animation.
+        ImGui::ProgressBar(-1.0f * (float)ImGui::GetTime(), ImVec2(-FLT_MIN, 0.0f),
+                           _L("Loading firmware + FPGA..."));
+    }
+    else if (!running)
     {
         bool canStart = (app.sourceMode == 1) ? (app.wavPath[0] != '\0') : true;
         ImGui::BeginDisabled(!canStart);
         if (ImGui::Button(_L("Start"), ImVec2(120, 0)))
-            startActive(app);
+            beginStartActive(app);
         ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::TextUnformatted(app.status.c_str());
     }
     else
     {
@@ -74,9 +149,9 @@ void drawControls(App& app)
             app.dualMode = false;
             app.status = "Idle";
         }
+        ImGui::SameLine();
+        ImGui::TextUnformatted(app.status.c_str());
     }
-    ImGui::SameLine();
-    ImGui::TextUnformatted(app.status.c_str());
 
     // Version + update banner.
     ImGui::TextDisabled("CellScope v" CELLSCOPE_VERSION);
@@ -424,6 +499,65 @@ void drawControls(App& app)
         if (ImGui::Checkbox(_L("DC block"), &app.dcBlock))
         {
             if (running) app.airspy.setDcBlock(app.dcBlock);
+        }
+    }
+#endif
+#ifdef HAS_LIBRESDR
+    else if (app.sourceMode == 6)
+    {
+        // ---- LibreSDR (USRP B210 clone via UHD) ----
+        if (ImGui::Button(_L("Refresh devices")))
+            app.devices = app.libre.listDevices();
+        ImGui::SameLine();
+        ImGui::Text("(%d found)", (int)app.devices.size());
+        if (!app.devices.empty())
+        {
+            std::string preview = app.devices[std::min(app.deviceIndex, (int)app.devices.size() - 1)].name;
+            if (ImGui::BeginCombo("Device", preview.c_str()))
+            {
+                for (int i = 0; i < (int)app.devices.size(); ++i)
+                {
+                    bool sel = (app.deviceIndex == i);
+                    std::string label = std::to_string(i) + ": " + app.devices[i].name +
+                                        " [" + app.devices[i].serial + "]";
+                    if (ImGui::Selectable(label.c_str(), sel))
+                        app.deviceIndex = i;
+                }
+                ImGui::EndCombo();
+            }
+        }
+
+        ImGui::BeginDisabled(running);
+        ImGui::SetNextItemWidth(-90.0f);
+        ImGui::InputText("FPGA image", app.libreFpgaPath, sizeof(app.libreFpgaPath));
+        ImGui::EndDisabled();
+
+        if (ImGui::InputDouble("Center (MHz)", &app.centerFreqMHz, 0.1, 1.0, "%.4f"))
+        {
+            app.viewA.resetView = true;
+            if (running)
+                app.libre.setCenterFreq(app.centerFreqMHz * 1e6);
+        }
+        if (ImGui::InputDouble("Sample rate (MHz)", &app.libreSampleRateMHz, 0.5, 1.0, "%.3f"))
+        {
+            if (app.libreSampleRateMHz < 0.2) app.libreSampleRateMHz = 0.2;
+            if (app.libreSampleRateMHz > 56.0) app.libreSampleRateMHz = 56.0;
+            app.viewA.resetView = true;
+            if (running)
+                app.libre.setSampleRate(app.libreSampleRateMHz * 1e6);
+        }
+        const char* libreAnts[] = {"RX2", "TX/RX"};
+        ImGui::BeginDisabled(running);
+        ImGui::Combo("Antenna", &app.libreAntennaIdx, libreAnts, 2);
+        ImGui::EndDisabled();
+        if (ImGui::SliderFloat("Gain (dB)", &app.libreGainDb, 0.0f, 76.0f, "%.1f"))
+        {
+            if (running)
+                app.libre.setGain((double)app.libreGainDb);
+        }
+        if (ImGui::Checkbox(_L("DC block"), &app.dcBlock))
+        {
+            if (running) app.libre.setDcBlock(app.dcBlock);
         }
     }
 #endif

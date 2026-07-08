@@ -24,6 +24,10 @@ void retuneActive(App& app, double centerMHz)
     else if (app.sourceMode == 5)
         app.airspy.setCenterFreq(hz);
 #endif
+#ifdef HAS_LIBRESDR
+    else if (app.sourceMode == 6)
+        app.libre.setCenterFreq(hz);
+#endif
     app.decoders.removeAll();
     app.decoders.configure(app.active->sampleRate(), hz);
     // Rebuild the frequency axis now (processFft already ran this frame with the
@@ -53,6 +57,10 @@ void retunePreserving(App& app, double centerMHz)
 #ifdef HAS_AIRSPY
     else if (app.sourceMode == 5)
         app.airspy.setCenterFreq(hz);
+#endif
+#ifdef HAS_LIBRESDR
+    else if (app.sourceMode == 6)
+        app.libre.setCenterFreq(hz);
 #endif
     app.decoders.removeAll();
     app.decoders.configure(app.active->sampleRate(), hz);
