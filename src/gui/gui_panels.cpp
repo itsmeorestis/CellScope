@@ -1648,21 +1648,24 @@ void drawLteUes(App& app)
                   ues.end());
     }
 
-    if (ImGui::BeginTable("lte_ues", 7,
+    if (ImGui::BeginTable("lte_ues", 10,
                           ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY |
                           ImGuiTableFlags_Sortable | ImGuiTableFlags_SortTristate))
     {
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableSetupColumn("RNTI", ImGuiTableColumnFlags_WidthFixed, 70);
+        ImGui::TableSetupColumn("Active", ImGuiTableColumnFlags_WidthFixed, 45);
         ImGui::TableSetupColumn("Call", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 50);
         ImGui::TableSetupColumn("DL rate", ImGuiTableColumnFlags_WidthStretch | ImGuiTableColumnFlags_PreferSortDescending);
         ImGui::TableSetupColumn("DL total",
                                 ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_DefaultSort |
                                     ImGuiTableColumnFlags_PreferSortDescending,
                                 90);
+        ImGui::TableSetupColumn("UL total", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 90);
         ImGui::TableSetupColumn("msgs", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 60);
         ImGui::TableSetupColumn("MCS", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 40);
-        ImGui::TableSetupColumn("identity", ImGuiTableColumnFlags_WidthFixed, 130);
+        ImGui::TableSetupColumn("Id type", ImGuiTableColumnFlags_WidthFixed, 60);
+        ImGui::TableSetupColumn("Id value", ImGuiTableColumnFlags_WidthFixed, 120);
         ImGui::TableHeadersRow();
 
         // Sort by the clicked header (default: DL total, descending). Re-sorted
@@ -1675,18 +1678,31 @@ void drawLteUes(App& app)
                 const bool asc = (s.SortDirection == ImGuiSortDirection_Ascending);
                 std::sort(ues.begin(), ues.end(),
                           [&](const lte::UeStat& a, const lte::UeStat& b) {
-                              if (s.ColumnIndex == 6)
+                              if (s.ColumnIndex == 8)
                                   return asc ? a.identity < b.identity : a.identity > b.identity;
+                              if (s.ColumnIndex == 9)
+                              {
+                                  // sort by identity value (after first space)
+                                  auto idVal = [](const std::string& ident) -> std::string {
+                                      auto sp = ident.find(' ');
+                                      return sp != std::string::npos ? ident.substr(sp + 1) : ident;
+                                  };
+                                  return asc ? idVal(a.identity) < idVal(b.identity)
+                                             : idVal(a.identity) > idVal(b.identity);
+                              }
                               double d = 0.0;
                               switch (s.ColumnIndex)
                               {
                                   case 0: d = (double)a.rnti - (double)b.rnti; break;
-                                  case 1: d = ((a.voice ? 1.0 : 0.0) + a.voice_score) -
+                                  case 1: d = ((nowms - a.last_seen_ms) < 5000 ? 1.0 : 0.0) -
+                                             ((nowms - b.last_seen_ms) < 5000 ? 1.0 : 0.0); break;
+                                  case 2: d = ((a.voice ? 1.0 : 0.0) + a.voice_score) -
                                              ((b.voice ? 1.0 : 0.0) + b.voice_score); break;
-                                  case 2: d = a.dl_bps - b.dl_bps; break;
-                                  case 3: d = (double)a.dl_bytes - (double)b.dl_bytes; break;
-                                  case 4: d = (double)a.dl_msgs - (double)b.dl_msgs; break;
-                                  case 5: d = (double)a.last_mcs - (double)b.last_mcs; break;
+                                  case 3: d = a.dl_bps - b.dl_bps; break;
+                                  case 4: d = (double)a.dl_bytes - (double)b.dl_bytes; break;
+                                  case 5: d = (double)a.ul_bytes - (double)b.ul_bytes; break;
+                                  case 6: d = (double)a.dl_msgs - (double)b.dl_msgs; break;
+                                  case 7: d = (double)a.last_mcs - (double)b.last_mcs; break;
                                   default: break;
                               }
                               if (d == 0.0) return a.rnti < b.rnti; // stable tiebreak
@@ -1703,6 +1719,7 @@ void drawLteUes(App& app)
             const bool pinned    = app.lteWatched.count(u.rnti) > 0;
             const bool recentNew = (nowms - u.first_seen_ms) < 5000;
             const bool active    = (nowms - u.last_seen_ms) < 3000;
+            const bool live      = (nowms - u.last_seen_ms) < 5000;
             ImGui::TableNextRow();
             if (pinned)
                 ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0,
@@ -1724,6 +1741,13 @@ void drawLteUes(App& app)
             ImGui::PopStyleColor();
             ImGui::PopID();
 
+            // Activity indicator: green dot if seen within 5s
+            ImGui::TableNextColumn();
+            if (live)
+                ImGui::TextColored(ImVec4(0.30f, 0.95f, 0.40f, 1.0f), "\xe2\x97\x8f"); // U+25CF
+            else
+                ImGui::TextDisabled("\xe2\x80\x94"); // U+2014 em dash
+
             ImGui::TableNextColumn();
             if (u.voice)
                 ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.15f, 1.0f), "CALL");
@@ -1740,9 +1764,45 @@ void drawLteUes(App& app)
                 if (kb >= 1024.0) ImGui::Text("%.2f MB", kb / 1024.0);
                 else              ImGui::Text("%.1f KB", kb);
             }
+
+            // UL total (same formatting as DL total)
+            ImGui::TableNextColumn();
+            {
+                double kb = u.ul_bytes / 1024.0;
+                if (kb >= 1024.0) ImGui::Text("%.2f MB", kb / 1024.0);
+                else              ImGui::Text("%.1f KB", kb);
+            }
+
             ImGui::TableNextColumn(); ImGui::Text("%u", u.dl_msgs);
             ImGui::TableNextColumn(); ImGui::Text("%d", u.last_mcs);
-            ImGui::TableNextColumn(); ImGui::TextUnformatted(u.identity.c_str());
+
+            // Split identity into type + value
+            {
+                const std::string& id = u.identity;
+                auto sp = id.find(' ');
+                const char* idType = "";
+                const char* idVal  = id.c_str(); // default: show raw value
+                if (sp != std::string::npos && id.size() > sp + 1)
+                {
+                    if (id.compare(0, 5, "TMSI ") == 0)
+                    {
+                        idType = "TMSI";
+                        idVal  = id.c_str() + 5;
+                    }
+                    else if (id.compare(0, 5, "IMSI ") == 0)
+                    {
+                        idType = "IMSI";
+                        idVal  = id.c_str() + 5;
+                    }
+                    else if (id.compare(0, 22, "Contention Resolution ") == 0)
+                    {
+                        idType = "CR";
+                        idVal  = id.c_str() + 22;
+                    }
+                }
+                ImGui::TableNextColumn(); ImGui::TextUnformatted(idType);
+                ImGui::TableNextColumn(); ImGui::TextUnformatted(idVal);
+            }
         }
         ImGui::EndTable();
     }

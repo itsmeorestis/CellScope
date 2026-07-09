@@ -817,6 +817,14 @@ static std::string operator_name(int mcc, int mnc)
             default:  return "USA";
         }
     }
+    if (mcc == 202) { // Greece
+        switch (mnc) {
+            case 1:  case 14: return "Cosmote";
+            case 5:            return "Vodafone GR";
+            case 9:  case 10: return "Nova";
+            default:           return "Greece";
+        }
+    }
     if (mcc == 234 || mcc == 235) return "UK";
     if (mcc == 262) return "Germany";
     if (mcc == 302) return "Canada";
