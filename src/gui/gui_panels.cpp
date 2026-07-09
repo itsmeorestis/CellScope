@@ -33,55 +33,12 @@
 #include <shellapi.h>
 #endif
 
-// Kick off source startup. Most backends open instantly, but LibreSDR/UHD
-// blocks for several seconds in multi_usrp::make() (firmware + FPGA upload), so
-// open the device on a worker thread (prepare()) and surface an animated
-// "Initializing..." bar. When the worker finishes, the main loop finalizes the
-// start on the GUI thread (startActive), so shared app state is only ever
-// touched from the render thread.
+// Kick off source startup. The RTL-SDR family opens effectively instantly, so
+// this just finalizes the start on the GUI thread (startActive). The async
+// worker path (app.starting/startThread) remains available for any backend
+// whose open() can block.
 static void beginStartActive(App& app)
 {
-#ifdef HAS_LIBRESDR
-    if (app.sourceMode == 6)
-    {
-        if (app.startThread.joinable())
-            app.startThread.join();
-
-        // Query available antennas from the hardware (lightweight probe)
-        // so the antenna picker in the device panel shows the real list.
-        std::vector<std::string> ants = app.libre.rxAntennas();
-        if (!ants.empty())
-        {
-            // Clamp the saved antenna name to one that actually exists.
-            bool found = false;
-            for (auto& a : ants)
-                if (a == std::string(app.libreAntenna)) { found = true; break; }
-            if (!found)
-                std::strncpy(app.libreAntenna, ants[0].c_str(), sizeof(app.libreAntenna) - 1);
-        }
-
-        // Apply config up front so the worker's open() uses the right settings.
-        app.libre.setFpgaImage(app.libreFpgaPath);
-        app.libre.setSampleRate(app.libreSampleRateMHz * 1e6);
-        app.libre.setCenterFreq(app.centerFreqMHz * 1e6);
-        app.libre.setGain((double)app.libreGainDb);
-        app.libre.setAntenna(app.libreAntenna);
-        app.libre.setDcBlock(app.dcBlock);
-
-        app.status = "Initializing LibreSDR...";
-        app.startErr.clear();
-        app.startReady.store(false);
-        app.starting.store(true);
-        app.startThread = std::thread([&app]() {
-            std::string err;
-            bool ok = app.libre.prepare(app.deviceIndex, err);
-            app.startErr = ok ? std::string()
-                              : (err.empty() ? std::string("open failed") : err);
-            app.startReady.store(true);
-        });
-        return;
-    }
-#endif
     startActive(app);
 }
 
@@ -105,11 +62,11 @@ void drawControls(App& app)
         ImGui::Button(_L("Start"), ImVec2(120, 0));
         ImGui::EndDisabled();
         ImGui::SameLine();
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "%s", _L("Initializing LibreSDR"));
-        // Indeterminate animated bar: UHD's multi_usrp::make() gives no progress,
-        // so a negative fraction drives ImGui's scrolling "busy" animation.
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "%s", _L("Initializing..."));
+        // Indeterminate animated bar: a negative fraction drives ImGui's
+        // scrolling "busy" animation while the source opens.
         ImGui::ProgressBar(-1.0f * (float)ImGui::GetTime(), ImVec2(-FLT_MIN, 0.0f),
-                           _L("Loading firmware + FPGA..."));
+                           _L("Opening device..."));
     }
     else if (!running)
     {
@@ -331,240 +288,6 @@ void drawControls(App& app)
         }
         ImGui::TextDisabled("Gain and device are configured on the SDR++ server.");
     }
-    else if (app.sourceMode == 3)
-    {
-        // ---- HackRF (native) ----
-        if (ImGui::Button(_L("Refresh devices")))
-            app.devices = app.hack.listDevices();
-        ImGui::SameLine();
-        ImGui::Text("(%d found)", (int)app.devices.size());
-        if (!app.devices.empty())
-        {
-            std::string preview = app.devices[std::min(app.deviceIndex, (int)app.devices.size() - 1)].name;
-            if (ImGui::BeginCombo("Device", preview.c_str()))
-            {
-                for (int i = 0; i < (int)app.devices.size(); ++i)
-                {
-                    bool sel = (app.deviceIndex == i);
-                    std::string label = std::to_string(i) + ": " + app.devices[i].name +
-                                        " [" + app.devices[i].serial + "]";
-                    if (ImGui::Selectable(label.c_str(), sel))
-                        app.deviceIndex = i;
-                }
-                ImGui::EndCombo();
-            }
-        }
-
-        if (ImGui::InputDouble("Center (MHz)", &app.centerFreqMHz, 0.1, 1.0, "%.4f"))
-        {
-            app.viewA.resetView = true;
-            if (running)
-                app.hack.setCenterFreq(app.centerFreqMHz * 1e6);
-        }
-        if (ImGui::InputDouble("Sample rate (MHz)", &app.hackSampleRateMHz, 1.0, 2.0, "%.3f"))
-        {
-            if (app.hackSampleRateMHz < 2.0) app.hackSampleRateMHz = 2.0;
-            if (app.hackSampleRateMHz > 20.0) app.hackSampleRateMHz = 20.0;
-            app.viewA.resetView = true;
-            if (running)
-                app.hack.setSampleRate(app.hackSampleRateMHz * 1e6);
-        }
-        if (ImGui::SliderInt("LNA (IF) dB", &app.hackLna, 0, 40, "%d"))
-        {
-            app.hackLna = (app.hackLna / 8) * 8;
-            if (running) app.hack.setLnaGain(app.hackLna);
-        }
-        if (ImGui::SliderInt("VGA (BB) dB", &app.hackVga, 0, 62, "%d"))
-        {
-            app.hackVga = (app.hackVga / 2) * 2;
-            if (running) app.hack.setVgaGain(app.hackVga);
-        }
-        if (ImGui::Checkbox("RF amp (+~11 dB)", &app.hackAmp))
-        {
-            if (running) app.hack.setAmpEnable(app.hackAmp);
-        }
-        if (ImGui::Checkbox("Bias-T (antenna power)", &app.hackBias))
-        {
-            if (running) app.hack.setBiasTee(app.hackBias);
-        }
-        if (ImGui::Checkbox(_L("DC block"), &app.dcBlock))
-        {
-            if (running) app.hack.setDcBlock(app.dcBlock);
-        }
-    }
-#ifdef HAS_AIRSPY
-    else if (app.sourceMode == 5)
-    {
-        // ---- Airspy (native) ----
-        if (ImGui::Button(_L("Refresh devices")))
-            app.devices = app.airspy.listDevices();
-        ImGui::SameLine();
-        ImGui::Text("(%d found)", (int)app.devices.size());
-        if (!app.devices.empty())
-        {
-            std::string preview = app.devices[std::min(app.deviceIndex, (int)app.devices.size() - 1)].name;
-            if (ImGui::BeginCombo("Device", preview.c_str()))
-            {
-                for (int i = 0; i < (int)app.devices.size(); ++i)
-                {
-                    bool sel = (app.deviceIndex == i);
-                    std::string label = std::to_string(i) + ": " + app.devices[i].name +
-                                        " [" + app.devices[i].serial + "]";
-                    if (ImGui::Selectable(label.c_str(), sel))
-                        app.deviceIndex = i;
-                }
-                ImGui::EndCombo();
-            }
-        }
-
-        if (ImGui::InputDouble("Center (MHz)", &app.centerFreqMHz, 0.1, 1.0, "%.4f"))
-        {
-            app.viewA.resetView = true;
-            if (running)
-                app.airspy.setCenterFreq(app.centerFreqMHz * 1e6);
-        }
-        if (ImGui::Combo(_L("Sample rate (MHz)"), &app.airspySampleRateIdx, kAirspyRateLabels, kAirspyNumRates))
-        {
-            app.viewA.resetView = true;
-            if (running)
-                app.airspy.setSampleRate(kAirspyRates[app.airspySampleRateIdx]);
-        }
-
-        ImGui::Separator();
-        if (ImGui::RadioButton("Sensitive", app.airspyGainMode == 0)) app.airspyGainMode = 0;
-        ImGui::SameLine();
-        if (ImGui::RadioButton("Linear", app.airspyGainMode == 1)) app.airspyGainMode = 1;
-        ImGui::SameLine();
-        if (ImGui::RadioButton("Free", app.airspyGainMode == 2)) app.airspyGainMode = 2;
-
-        if (app.airspyGainMode == 0)
-        {
-            if (ImGui::SliderInt("Sensitivity gain", &app.airspySenseGain, 0, 21))
-            {
-                if (running) app.airspy.setGainMode(0), app.airspy.setSenseGain(app.airspySenseGain);
-            }
-        }
-        else if (app.airspyGainMode == 1)
-        {
-            if (ImGui::SliderInt("Linearity gain", &app.airspyLinearGain, 0, 21))
-            {
-                if (running) app.airspy.setGainMode(1), app.airspy.setLinearGain(app.airspyLinearGain);
-            }
-        }
-        else
-        {
-            if (ImGui::Checkbox("LNA AGC", &app.airspyLnaAgc))
-            {
-                if (running) app.airspy.setLnaAgc(app.airspyLnaAgc);
-            }
-            ImGui::BeginDisabled(app.airspyLnaAgc);
-            if (ImGui::SliderInt("LNA gain", &app.airspyLnaGain, 0, 15))
-            {
-                if (running) app.airspy.setLnaGain(app.airspyLnaGain);
-            }
-            ImGui::EndDisabled();
-
-            if (ImGui::Checkbox("Mixer AGC", &app.airspyMixerAgc))
-            {
-                if (running) app.airspy.setMixerAgc(app.airspyMixerAgc);
-            }
-            ImGui::BeginDisabled(app.airspyMixerAgc);
-            if (ImGui::SliderInt("Mixer gain", &app.airspyMixerGain, 0, 15))
-            {
-                if (running) app.airspy.setMixerGain(app.airspyMixerGain);
-            }
-            ImGui::EndDisabled();
-
-            if (ImGui::SliderInt("VGA gain", &app.airspyVgaGain, 0, 15))
-            {
-                if (running) app.airspy.setVgaGain(app.airspyVgaGain);
-            }
-        }
-        if (ImGui::Checkbox("Bias T (antenna power)", &app.airspyBias))
-        {
-            if (running) app.airspy.setBiasTee(app.airspyBias);
-        }
-        if (ImGui::Checkbox(_L("DC block"), &app.dcBlock))
-        {
-            if (running) app.airspy.setDcBlock(app.dcBlock);
-        }
-    }
-#endif
-#ifdef HAS_LIBRESDR
-    else if (app.sourceMode == 6)
-    {
-        // ---- LibreSDR (USRP B210 clone via UHD) ----
-        if (ImGui::Button(_L("Refresh devices")))
-            app.devices = app.libre.listDevices();
-        ImGui::SameLine();
-        ImGui::Text("(%d found)", (int)app.devices.size());
-        if (!app.devices.empty())
-        {
-            std::string preview = app.devices[std::min(app.deviceIndex, (int)app.devices.size() - 1)].name;
-            if (ImGui::BeginCombo("Device", preview.c_str()))
-            {
-                for (int i = 0; i < (int)app.devices.size(); ++i)
-                {
-                    bool sel = (app.deviceIndex == i);
-                    std::string label = std::to_string(i) + ": " + app.devices[i].name +
-                                        " [" + app.devices[i].serial + "]";
-                    if (ImGui::Selectable(label.c_str(), sel))
-                        app.deviceIndex = i;
-                }
-                ImGui::EndCombo();
-            }
-        }
-
-        ImGui::BeginDisabled(running);
-        ImGui::SetNextItemWidth(-90.0f);
-        ImGui::InputText("FPGA image", app.libreFpgaPath, sizeof(app.libreFpgaPath));
-        ImGui::EndDisabled();
-
-        if (ImGui::InputDouble("Center (MHz)", &app.centerFreqMHz, 0.1, 1.0, "%.4f"))
-        {
-            app.viewA.resetView = true;
-            if (running)
-                app.libre.setCenterFreq(app.centerFreqMHz * 1e6);
-        }
-        if (ImGui::InputDouble("Sample rate (MHz)", &app.libreSampleRateMHz, 0.5, 1.0, "%.3f"))
-        {
-            if (app.libreSampleRateMHz < 0.2) app.libreSampleRateMHz = 0.2;
-            if (app.libreSampleRateMHz > 56.0) app.libreSampleRateMHz = 56.0;
-            app.viewA.resetView = true;
-            if (running)
-                app.libre.setSampleRate(app.libreSampleRateMHz * 1e6);
-        }
-        std::vector<std::string> libreAnts = app.libre.rxAntennas();
-        if (libreAnts.empty())
-            libreAnts = {"RX2", "TX/RX"}; // fallback
-        ImGui::BeginDisabled(running);
-        if (ImGui::BeginCombo("Antenna", app.libreAntenna))
-        {
-            for (int i = 0; i < (int)libreAnts.size(); ++i)
-            {
-                bool sel = (libreAnts[i] == std::string(app.libreAntenna));
-                if (ImGui::Selectable(libreAnts[i].c_str(), sel))
-                {
-                    std::strncpy(app.libreAntenna, libreAnts[i].c_str(), sizeof(app.libreAntenna) - 1);
-                    app.libreAntenna[sizeof(app.libreAntenna) - 1] = 0;
-                    if (running)
-                        app.libre.setAntenna(app.libreAntenna);
-                }
-            }
-            ImGui::EndCombo();
-        }
-        ImGui::EndDisabled();
-        if (ImGui::SliderFloat("Gain (dB)", &app.libreGainDb, 0.0f, 76.0f, "%.1f"))
-        {
-            if (running)
-                app.libre.setGain((double)app.libreGainDb);
-        }
-        if (ImGui::Checkbox(_L("DC block"), &app.dcBlock))
-        {
-            if (running) app.libre.setDcBlock(app.dcBlock);
-        }
-    }
-#endif
     if (app.sourceMode == 4)
     {
         // ---- Dual RTL: two independent RTL-SDRs ----
@@ -1471,56 +1194,73 @@ void drawLte(App& app)
                            ci.nof_prb, ci.decode_rate_hz / 1e6, capMHz);
     }
 
-    // ---- Auto-center: fold the cell CFO into the RTL PPM correction ----
-    // Only meaningful for the RTL source (PPM correction path). A cheap dongle's
-    // oscillator can be tens of ppm off; at ~763 MHz that is tens of kHz, several
-    // LTE subcarriers, which exceeds srsRAN's tracking range and makes the cell
-    // lock drop and re-acquire ("random retries"). Applying the measured offset as
-    // a PPM correction retunes the hardware so the cell lands near DC.
-    if (app.sourceMode == 0 || app.sourceMode == 4)
+    // ---- Auto-center: fold the cell CFO back into the IQ stream ----
+    // Instead of retuning the SDR (PPM adjustment), which glitches the IQ stream
+    // and kicks srsRAN's sync PLL off lock, we apply a digital frequency shift
+    // inside the LTE engine's sample pipeline.  The rotation is phase-continuous —
+    // no glitch, no lost subframes.  Works with any SDR source, not just RTL.
     {
-        // delta_ppm = cfo_hz / center_hz * 1e6 == cfo_hz / freq_mhz. Positive CFO
-        // (cell above center) needs a positive correction to tune higher, moving
-        // the cell toward DC. Added to the existing PPM so it composes with any
-        // manual value and persists across retunes.
-        auto applyCenter = [&](double cfo_hz, double freq_mhz) {
-            if (freq_mhz <= 0.0)
-                return;
-            app.ppm += (float)(cfo_hz / freq_mhz);
-            app.sdr.setPpm((double)app.ppm);
+        auto applyCenter = [&](double cfo_hz) {
+            double cur  = app.lteEngine.cfoCorrection();
+            double next = app.lteEngine.setCfoCorrection(cur + cfo_hz);
             app.lteLastCenterT = ImGui::GetTime();
+            (void)next; // clamped value already applied
         };
 
         const double nowT = ImGui::GetTime();
 
-        // Centering is only useful on a decodable cell. On a bandwidth-limited
-        // (too-wide) cell srsRAN's sync is marginal and its CFO estimate is noisy,
-        // so acting on it just thrashes the tuner -- disable both paths there.
+        // Centering is allowed whenever we have a cell lock.  We use whatever
+        // CFO estimate is available:
+        //   Coarse (from cell search, cfo_live=false) — accurate to ~1-2 kHz,
+        //     good enough to bring the cell within srsRAN's tracking range.
+        //     Requiring cfo_live for the initial centering creates a deadlock:
+        //     the decode PLL can't lock at 5+ kHz offset, but we won't center
+        //     without a lock.
+        //   Live (from decode PLL, cfo_live=true) — precise, used for fine
+        //     drift correction once the decode is running.
         const bool canCenter = haveCell && !ci.bw_limited;
 
-        // Manual: available on a decodable cell. ci.cfo_hz is the live tracked
-        // offset (published each second by the decode loop).
+        // Manual: always available.  Click this once to bootstrap when the
+        // CFO is large and the decode loop can't lock on its own.
         ImGui::BeginDisabled(!canCenter);
         if (ImGui::Button("Center now"))
-            applyCenter(ci.cfo_hz, ci.freq_mhz);
+            applyCenter(ci.cfo_hz);
         ImGui::EndDisabled();
         ImGui::SameLine();
         ImGui::Checkbox("Auto-center", &app.lteAutoCenter);
         if (haveCell)
         {
             ImGui::SameLine();
-            ImGui::TextDisabled("CFO %.0f Hz (%.1f ppm)", ci.cfo_hz,
-                                ci.freq_mhz > 0 ? ci.cfo_hz / ci.freq_mhz : 0.0);
+            double dCorr = app.lteEngine.cfoCorrection();
+            char cfoBuf[96];
+            if (std::fabs(dCorr) > 1.0)
+                std::snprintf(cfoBuf, sizeof(cfoBuf),
+                              "CFO %.0f Hz  [dig.corr %.0f Hz]", ci.cfo_hz, dCorr);
+            else
+                std::snprintf(cfoBuf, sizeof(cfoBuf), "CFO %.0f Hz", ci.cfo_hz);
+            ImGui::TextDisabled("%s", cfoBuf);
         }
 
-        // Auto: re-center as the offset drifts, but only on a decodable cell, only
-        // when it exceeds ~1 kHz, and at most once every 5 s. Retuning briefly
-        // disturbs the lock, so the cooldown both prevents oscillation and lets
-        // srsRAN's own CFO tracking settle between hardware corrections.
-        if (app.lteAutoCenter && canCenter &&
-            std::fabs(ci.cfo_hz) > 1000.0 && (nowT - app.lteLastCenterT) > 5.0)
+        // Auto: re-center as the offset drifts.
+        //
+        // Two modes:
+        // 1. Bootstrap — first-ever centering with the coarse search CFO
+        //    (cfo_live=false, lteLastCenterT==0).  Fires immediately on the
+        //    next frame (no cooldown) so the decode PLL gets a centered signal
+        //    without waiting.  One-shot: lteLastCenterT is set on first fire,
+        //    disabling bootstrap thereafter.
+        // 2. Tracking — ongoing corrections using the live PLL CFO
+        //    (cfo_live=true).  The 5 s cooldown lets srsRAN's CFO tracking
+        //    settle between corrections so we don't chase noise.  The digital
+        //    rotation is glitch-free, so each correction does NOT disturb the
+        //    decode lock.
+        const bool bootstrap = !ci.cfo_live && app.lteLastCenterT == 0.0;
+        const bool canAuto  = haveCell && !ci.bw_limited && (ci.cfo_live || bootstrap);
+        const bool ready = bootstrap || (nowT - app.lteLastCenterT) > 5.0;
+        if (app.lteAutoCenter && canAuto &&
+            std::fabs(ci.cfo_hz) > 1000.0 && ready)
         {
-            applyCenter(ci.cfo_hz, ci.freq_mhz);
+            applyCenter(ci.cfo_hz);
         }
     }
 

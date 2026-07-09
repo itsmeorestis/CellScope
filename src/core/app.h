@@ -5,13 +5,6 @@
 #include "dsp/jfft.h"
 #include "gui/waterfall.h"
 #include "sdr/rtl_sdr_source.h"
-#include "sdr/hackrf_source.h"
-#ifdef HAS_AIRSPY
-#include "sdr/airspy_source.h"
-#endif
-#ifdef HAS_LIBRESDR
-#include "sdr/libresdr_source.h"
-#endif
 #include "sdr/wav_file_source.h"
 #include "sdr/sdrpp_server_source.h"
 #include "sdr/iq_recorder.h"
@@ -57,15 +50,8 @@ struct App
     RtlSdrSource    sdr;
     WavFileSource   wav;
     SdrppServerSource server;
-    HackRfSource    hack;
-#ifdef HAS_AIRSPY
-    AirspySource    airspy;
-#endif
-#ifdef HAS_LIBRESDR
-    LibreSdrSource  libre;
-#endif
     SdrSource*      active = &sdr;
-    int  sourceMode = 0; // 0=RTL, 1=WAV, 2=SDR++ Server, 3=HackRF, 4=Dual RTL, 5=Airspy, 6=LibreSDR
+    int  sourceMode = 0; // 0=RTL, 1=WAV, 2=SDR++ Server, 4=Dual RTL
     char wavPath[512] = "";
     bool wavLoop = true;
     char serverHost[128] = "localhost";
@@ -73,35 +59,6 @@ struct App
     bool serverCompression = true;
     int  serverSampleType = 1;
     double serverSampleRateMHz = 2.0;
-
-    // HackRF
-    double hackSampleRateMHz = 10.0;
-    int    hackLna = 16;
-    int    hackVga = 16;
-    bool   hackAmp = false;
-    bool   hackBias = false;
-
-    // Airspy
-#ifdef HAS_AIRSPY
-    int    airspySampleRateIdx = 3;  // index into kAirspyRates (3 = 10 MHz)
-    int    airspyGainMode = 0;      // 0=Sensitivity, 1=Linear, 2=Free
-    int    airspySenseGain = 10;    // 0-21
-    int    airspyLinearGain = 10;   // 0-21
-    int    airspyLnaGain = 8;       // 0-15
-    int    airspyMixerGain = 8;     // 0-15
-    int    airspyVgaGain = 4;       // 0-15
-    bool   airspyLnaAgc = false;
-    bool   airspyMixerAgc = false;
-    bool   airspyBias = false;
-#endif
-
-    // LibreSDR (USRP B210 clone, driven via UHD with our custom FPGA image)
-#ifdef HAS_LIBRESDR
-    double libreSampleRateMHz = 4.0;
-    float  libreGainDb = 40.0f;   // B210 RX gain 0..76 dB
-    char   libreAntenna[32] = "RX2";   // queried from UHD at start
-    char   libreFpgaPath[512] = "libresdr_b210.bin";
-#endif
 
     SpectrumView     viewA;
     SpectrumView     viewB;
@@ -208,8 +165,8 @@ struct App
 
     double lastConfiguredFs = 0.0;
 
-    // Async source startup (used for slow backends like LibreSDR/UHD, whose
-    // multi_usrp::make() blocks for several seconds loading firmware + FPGA).
+    // Async source startup (used for backends whose open path can block for a
+    // while, e.g. connecting to an SDR++ server over the network).
     // The worker only opens the device (prepare()); when it signals startReady
     // the GUI thread finalizes (startActive) so no shared state is touched off
     // the render thread.
@@ -227,11 +184,6 @@ constexpr const char* kRateLabels[] = {
     "0.25", "0.9", "1.024", "1.2", "1.4", "1.536",
     "1.8", "1.92", "2.048", "2.4", "2.56", "2.88", "3.2"};
 constexpr int kNumRates = (int)(sizeof(kRates) / sizeof(kRates[0]));
-
-// Airspy sample rates (MHz values as doubles, and index-to-label).
-constexpr double kAirspyRates[] = {2.5e6, 3.0e6, 6.0e6, 10.0e6};
-constexpr const char* kAirspyRateLabels[] = {"2.5", "3.0", "6.0", "10.0"};
-constexpr int kAirspyNumRates = (int)(sizeof(kAirspyRates) / sizeof(kAirspyRates[0]));
 
 constexpr int    kFftSizes[] = {1024, 2048, 4096, 8192, 16384, 32768, 65536};
 constexpr const char* kFftLabels[] = {"1024", "2048", "4096", "8192", "16384", "32768", "65536"};

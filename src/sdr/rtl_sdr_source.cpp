@@ -35,8 +35,14 @@ void RtlSdrSource::applyGain()
 
     if (gainDb_ < 0.0)
     {
-        rtlsdr_set_tuner_gain_mode(dev_, 0); // auto
-        rtlsdr_set_agc_mode(dev_, 1);
+        rtlsdr_set_tuner_gain_mode(dev_, 0); // tuner auto-gain
+        rtlsdr_set_agc_mode(dev_, 1);        // RTL2832U digital AGC ON —
+        // Without the digital AGC the 8-bit ADC samples use only 2-3 effective
+        // bits when the tuner gain is conservative, killing QAM demodulation
+        // (PSS correlation still works, so the cell search locks, but the
+        // decode PLL drops out).  The digital AGC can pump at the OFDM symbol
+        // rate on strong signals, but the alternative — no decode at all — is
+        // worse.  If you see the lock toggling, switch to manual gain.
         return;
     }
 

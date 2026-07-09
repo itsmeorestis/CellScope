@@ -46,16 +46,6 @@ void cfgWriteAll(App& app, ImGuiTextBuffer* buf)
     WS(wavPath); WI(wavLoop);
     WS(serverHost); WI(serverPort); WI(serverCompression); WI(serverSampleType);
     WD(serverSampleRateMHz);
-    WD(hackSampleRateMHz); WI(hackLna); WI(hackVga); WI(hackAmp); WI(hackBias);
-#ifdef HAS_AIRSPY
-    WI(airspySampleRateIdx); WI(airspyGainMode); WI(airspySenseGain); WI(airspyLinearGain);
-    WI(airspyLnaGain); WI(airspyMixerGain); WI(airspyVgaGain);
-    WI(airspyLnaAgc); WI(airspyMixerAgc); WI(airspyBias);
-#endif
-#ifdef HAS_LIBRESDR
-    WD(libreSampleRateMHz); WF(libreGainDb); WS(libreAntenna);
-    WS(libreFpgaPath);
-#endif
     WI(deviceIndexB); WD(centerFreqMHzB); WI(sampleRateIdxB);
     WI(autoGainB); WF(gainDbB); WI(biasTeeB); WF(ppmB);
     WI(saveDecoders);
@@ -105,16 +95,6 @@ void cfgReadLine(App& app, const char* line)
     RS(wavPath); RB(wavLoop);
     RS(serverHost); RI(serverPort); RB(serverCompression); RI(serverSampleType);
     RD(serverSampleRateMHz);
-    RD(hackSampleRateMHz); RI(hackLna); RI(hackVga); RB(hackAmp); RB(hackBias);
-#ifdef HAS_AIRSPY
-    RI(airspySampleRateIdx); RI(airspyGainMode); RI(airspySenseGain); RI(airspyLinearGain);
-    RI(airspyLnaGain); RI(airspyMixerGain); RI(airspyVgaGain);
-    RB(airspyLnaAgc); RB(airspyMixerAgc); RB(airspyBias);
-#endif
-#ifdef HAS_LIBRESDR
-    RD(libreSampleRateMHz); RF(libreGainDb); RS(libreAntenna);
-    RS(libreFpgaPath);
-#endif
     RI(deviceIndexB); RD(centerFreqMHzB); RI(sampleRateIdxB);
     RB(autoGainB); RF(gainDbB); RB(biasTeeB); RF(ppmB);
     RB(saveDecoders);

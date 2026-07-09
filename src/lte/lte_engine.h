@@ -29,6 +29,9 @@ struct CellInfo {
     int    nof_prb   = 0;    // bandwidth in PRB (6/15/25/50/75/100)
     int    nof_ports = 0;    // # of antenna ports at the eNB
     double cfo_hz    = 0.0;  // carrier frequency offset estimate (live during decode)
+    bool   cfo_live  = false; // true when cfo_hz comes from the decode PLL (reliable)
+                               // false when from coarse cell search (noisy, do not
+                               // auto-center on it).
     float  peak      = 0.0f; // correlation peak (search confidence)
     double freq_mhz  = 0.0;  // center frequency it was found at
     int    sfn       = -1;   // last decoded system frame number
@@ -147,6 +150,14 @@ public:
     // Latest equalized PDSCH constellation for the constellation-target UE
     // (the first pinned RNTI). Returns interleaved I,Q floats; sets outRnti.
     std::vector<float>      constellation(uint16_t& outRnti) const;
+
+    // Apply a digital carrier-frequency offset correction (Hz). This shifts the
+    // IQ stream by -correction_hz before it enters the decode pipeline — a
+    // glitch-free alternative to retuning the SDR. The trackable range is roughly
+    // ±sample_rate/2; corrections beyond that overflow the ring buffer's spectral
+    // window.  Returns the new total correction applied (accumulated).
+    double setCfoCorrection(double correction_hz);
+    double cfoCorrection() const;
 
     // Detected voice-call events (start/stop), most recent last (bounded).
     std::vector<CallEvent>  callLog() const;

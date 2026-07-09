@@ -47,7 +47,7 @@ uint64_t now_ms()
 
 // Anti-alias integer decimator (windowed-sinc FIR). srsran_resample_arb is an
 // 8-tap near-unity resampler and aliases heavily on large decimation (e.g.
-// 10 MHz -> 1.92 MHz for HackRF/Airspy), so we integer-decimate with a proper
+// a high input rate -> 1.92 MHz), so we integer-decimate with a proper
 // low-pass first, then let resample_arb handle the small fractional residual.
 struct DecimFir {
     int                D = 1;
@@ -172,6 +172,12 @@ struct LteEngine::Impl {
 
     // CFO estimate shared with MCSTracking (updated by decode workers).
     std::atomic<float>        est_cfo{0.0f};
+
+    // Digital CFO correction (glitch-free frequency shift applied to the IQ
+    // stream before it enters the ring buffer).  Updated by the GUI / auto-center
+    // thread; consumed by push_resampled() on the SDR thread.
+    std::atomic<double>       cfo_correction_hz{0.0};
+    double                    cfo_phase = 0.0; // guarded by resamp_mtx
 
     // --- worker + state ---
     std::thread               worker;
@@ -320,9 +326,40 @@ struct LteEngine::Impl {
             src = resample_out.data();
         }
 
+        // Stage 3: apply digital CFO correction (glitch-free complex rotation).
+        // Instead of retuning the SDR hardware (which glitches the IQ stream),
+        // we rotate the samples in software.  The phase is continuous across
+        // calls, so the decode PLL sees a smooth frequency shift and stays locked.
         std::lock_guard<std::mutex> lk(ring_mtx);
-        for (int i = 0; i < n; ++i) {
-            ring.push_back(src[i]);
+        double corr = cfo_correction_hz.load();
+        if (std::fabs(corr) > 0.5 && n > 0) {
+            const double dphi = 2.0 * M_PI * corr / tr;
+            const float  r_re = (float)std::cos(dphi);
+            const float  r_im = (float)-std::sin(dphi); // negative → down-shift
+            float        p_re = (float)std::cos(cfo_phase);
+            float        p_im = (float)-std::sin(cfo_phase);
+            for (int i = 0; i < n; ++i) {
+                // Complex multiply: src[i] * (p_re + j*p_im)
+                float sre = crealf(src[i]);
+                float sim = cimagf(src[i]);
+                float ore = sre * p_re - sim * p_im;
+                float oim = sre * p_im + sim * p_re;
+                cf_t rot;
+                __real__ rot = ore;
+                __imag__ rot = oim;
+                ring.push_back(rot);
+                // Advance phasor by one step: p *= (r_re + j*r_im)
+                float nr = p_re * r_re - p_im * r_im;
+                p_im    = p_re * r_im + p_im * r_re;
+                p_re    = nr;
+            }
+            cfo_phase += n * dphi;
+            cfo_phase  = std::fmod(cfo_phase, 2.0 * M_PI);
+            if (cfo_phase < 0) cfo_phase += 2.0 * M_PI;
+        } else {
+            for (int i = 0; i < n; ++i) {
+                ring.push_back(src[i]);
+            }
         }
         // Bound memory: drop oldest if the consumer falls behind.
         if (ring.size() > ring_cap) {
@@ -636,22 +673,33 @@ struct LteEngine::Impl {
 // ---- cell search (PSS/SSS) ----
 bool LteEngine::Impl::search_cell(CellInfo& out)
 {
+    // max_frames = 12 (was 8): more radio frames of PSS integration time before
+    // giving up, so a weak PSS that only crosses the correlation threshold on a
+    // few frames still gets caught.
     srsran_ue_cellsearch_t cs;
-    if (srsran_ue_cellsearch_init_multi(&cs, 8, recv_cb, cfg.nof_rx_antennas, this)) {
+    if (srsran_ue_cellsearch_init_multi(&cs, 12, recv_cb, cfg.nof_rx_antennas, this)) {
         set_status("cellsearch init failed");
         return false;
     }
     srsran_ue_cellsearch_set_nof_valid_frames(&cs, 4);
+    // Lower the PSS peak-to-sidelobe detection threshold from srsRAN's default
+    // 2.0 so weaker cells register a peak. This is safe: a false peak here does
+    // NOT create a phantom cell — MIB decode (CRC-protected) is the real gate and
+    // rejects noise. The only cost is a little extra time spent attempting MIB on
+    // a bad peak. cs.ue_sync.sfind is the find-state correlator used during scan.
+    srsran_sync_set_threshold(&cs.ue_sync.sfind, 1.5);
 
     srsran_ue_cellsearch_result_t found[3] = {};
     uint32_t                      max_nid2 = 0;
     int                           ret      = srsran_ue_cellsearch_scan(&cs, found, &max_nid2);
 
     bool ok = false;
-    if (ret > 0 && found[max_nid2].psr > 2.0f) {
+    // Accept a lower mean PSR to match the lowered find threshold above.
+    if (ret > 0 && found[max_nid2].psr > 1.5f) {
         out.pci      = (int)found[max_nid2].cell_id;
         out.peak     = found[max_nid2].peak;
         out.cfo_hz   = found[max_nid2].cfo;
+        out.cfo_live = false; // coarse search estimate, not yet PLL-tracked
         out.freq_mhz = cfg.center_freq_mhz;
         ok           = true;
     }
@@ -681,7 +729,10 @@ bool LteEngine::Impl::decode_mib(CellInfo& io)
     uint8_t  bch[SRSRAN_BCH_PAYLOAD_LEN] = {};
     uint32_t nof_ports                   = 0;
     int      sfn_offset                  = 0;
-    int      ret = srsran_ue_mib_sync_decode(&mib, 40, bch, &nof_ports, &sfn_offset);
+    // 80 frames (was 40): PBCH is soft-combined across attempts, so giving the
+    // decoder more radio frames lets a weak MIB accumulate enough SNR to pass
+    // its CRC instead of timing out.
+    int      ret = srsran_ue_mib_sync_decode(&mib, 80, bch, &nof_ports, &sfn_offset);
 
     bool ok = false;
     if (ret == SRSRAN_UE_MIB_FOUND) {
@@ -744,6 +795,22 @@ void LteEngine::Impl::run_worker()
         }
 
         // ---- DECODE PHASE ----
+        // Bootstrap: apply the coarse search CFO as a digital correction
+        // BEFORE starting the decode loop.  This brings the cell within
+        // srsRAN's ~1 kHz tracking range immediately, so the PLL locks on
+        // the first try instead of bouncing through sync-loss → re-search
+        // cycles while waiting for the GUI auto-center timer.
+        if (found && std::fabs(info.cfo_hz) > 500.0) {
+            double cur  = cfo_correction_hz.load();
+            double next = cur + info.cfo_hz;
+            const double limit = SRSRAN_CS_SAMP_FREQ * 0.45;
+            if (next > limit)  next = limit;
+            if (next < -limit) next = -limit;
+            cfo_correction_hz.store(next);
+            diagLog("CFO bootstrap: coarse " + std::to_string((int)info.cfo_hz) +
+                    " Hz, digital correction " + std::to_string((int)next) + " Hz");
+        }
+
         // Switch the input pipeline to the cell's sample rate and run the
         // PDCCH blind-search + PDSCH decode loop (FALCON + LTESniffer core).
         // Returns on stop OR sustained sync loss -> loop re-acquires.
@@ -918,8 +985,8 @@ void LteEngine::Impl::run_decode(CellInfo& ci)
 
     // Bandwidth check: a cell is decodable when the SDR captures its OCCUPIED
     // bandwidth (nof_prb * 180 kHz), not srsRAN's oversampled nominal 'srate'.
-    // E.g. a 100-PRB cell occupies 18 MHz and decodes fine from a 20 Msps HackRF
-    // even though srate is 23.04 MHz; comparing against srate would wrongly flag
+    // E.g. a 100-PRB cell occupies 18 MHz and decodes fine from an 18+ Msps
+    // capture even though srate is 23.04 MHz; comparing against srate would flag
     // it. If the input rate is below the occupied bandwidth we only capture the
     // center of the carrier: PSS/SSS/MIB (center 6 PRB) still decode so the cell
     // locks, but PDCCH spans the whole carrier and cannot be recovered -> 0 UEs.
@@ -988,6 +1055,19 @@ void LteEngine::Impl::run_decode(CellInfo& ci)
         return;
     }
     ue_sync.cfo_correct_enable_track = true;
+    // Weak-signal sync retention. srsRAN's known-cell defaults are strict because
+    // it assumes a phone sitting on its serving cell; for passive sniffing of a
+    // marginal cell they cause constant drop-outs:
+    //   strack (tracking) 1.5 -> 1.2  : ride through brief fades without declaring
+    //                                    sync loss.
+    //   sfind  (re-find)   3.0 -> 1.5  : when tracking IS lost, re-lock quickly at
+    //                                    the decode rate instead of falling all the
+    //                                    way out to a full cell re-acquisition
+    //                                    (which clears the UE table and looks like
+    //                                    a hard drop). 1.5 matches the search-path
+    //                                    threshold; MIB re-sync still gates it.
+    srsran_sync_set_threshold(&ue_sync.strack, 1.2);
+    srsran_sync_set_threshold(&ue_sync.sfind, 1.5);
 
     std::shared_ptr<SubframeWorker> cur_worker = phy.getAvail();
 
@@ -1036,6 +1116,16 @@ void LteEngine::Impl::run_decode(CellInfo& ci)
         int ret = srsran_ue_sync_zerocopy(&ue_sync, cur_worker->getBuffers(), max_num_samples);
         if (ret == 1) {
             uint32_t sf_idx = srsran_ue_sync_get_sfidx(&ue_sync);
+            // Gap recovery: subframes arrive ~1 ms apart. A long wall-clock gap
+            // since the last synced subframe means srsRAN dropped to FIND and
+            // re-locked, so we missed a run of subframes and the local SFN counter
+            // has drifted. Decoding with a wrong SFN yields wrong TTIs and zero
+            // valid grants, so fall back to MIB re-sync to realign before decoding.
+            if (decode_state == 1 && (now_ms() - last_sync_ms) > 200) {
+                decode_state = 0;
+                diagLog("run_decode: sync gap " + std::to_string(now_ms() - last_sync_ms) +
+                        " ms, re-syncing SFN");
+            }
             if (decode_state == 0) {
                 if (sf_idx == 0) {
                     uint8_t bch[SRSRAN_BCH_PAYLOAD_LEN];
@@ -1089,7 +1179,8 @@ void LteEngine::Impl::run_decode(CellInfo& ci)
             const double live_cfo = srsran_ue_sync_get_cfo(&ue_sync);
             {
                 std::lock_guard<std::mutex> lk(cell_mtx);
-                cell_info.cfo_hz = live_cfo;
+                cell_info.cfo_hz   = live_cfo;
+                cell_info.cfo_live = true; // PLL-tracked, reliable for auto-center
             }
             size_t nue;
             {
@@ -1154,6 +1245,14 @@ void LteEngine::start(const EngineConfig& cfg)
         // push_resampled() from a prior session while we reinitialize here.
         std::lock_guard<std::mutex> rlk(impl_->resamp_mtx);
         impl_->configure_resampler(out_rate);
+        // Reset the digital CFO correction. It is accumulated across in-session
+        // re-acquisitions (self-correcting: each re-search measures the residual
+        // on the already-shifted stream), but a fresh start() is a new tune —
+        // carrying a stale multi-kHz shift here drags the new cell outside PSS
+        // acquisition range so cell search can never find it. cfo_phase is
+        // guarded by resamp_mtx; the correction magnitude is atomic.
+        impl_->cfo_correction_hz.store(0.0);
+        impl_->cfo_phase = 0.0;
     }
     {
         std::lock_guard<std::mutex> lk(impl_->ring_mtx);
@@ -1291,6 +1390,22 @@ std::vector<CallEvent> LteEngine::callLog() const
 {
     std::lock_guard<std::mutex> lk(impl_->ue_mtx);
     return std::vector<CallEvent>(impl_->call_log.begin(), impl_->call_log.end());
+}
+
+double LteEngine::setCfoCorrection(double correction_hz)
+{
+    // Clamp to ±half the search sample rate (1.92 MHz / 2); beyond that the
+    // signal aliases across DC in the ring buffer.
+    const double limit = SRSRAN_CS_SAMP_FREQ * 0.45;
+    if (correction_hz > limit)  correction_hz = limit;
+    if (correction_hz < -limit) correction_hz = -limit;
+    impl_->cfo_correction_hz.store(correction_hz);
+    return correction_hz;
+}
+
+double LteEngine::cfoCorrection() const
+{
+    return impl_->cfo_correction_hz.load();
 }
 
 } // namespace cellscope::lte

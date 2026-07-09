@@ -152,9 +152,9 @@ int main(int, char**)
     {
         glfwPollEvents();
 
-        // Finalize an async source start (LibreSDR/UHD) once the worker thread
-        // has opened the device. Done on the GUI thread so startActive() only
-        // touches shared state (rings, decoders, active source) from here.
+        // Finalize an async source start once the worker thread has opened the
+        // device. Done on the GUI thread so startActive() only touches shared
+        // state (rings, decoders, active source) from here.
         if (app.startReady.exchange(false))
         {
             if (app.startThread.joinable())
@@ -253,7 +253,6 @@ int main(int, char**)
     app.sdrB.stop();
     app.wav.stop();
     app.server.stop();
-    app.hack.stop();
 #ifdef HAS_LTE
     app.lteEngine.stop();
 #endif

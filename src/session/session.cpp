@@ -113,50 +113,6 @@ void startActive(App& app)
             }
         }
     }
-    else if (app.sourceMode == 3)
-    {
-        app.active = &app.hack;
-        app.hack.setSampleRate(app.hackSampleRateMHz * 1e6);
-        app.hack.setCenterFreq(app.centerFreqMHz * 1e6);
-        app.hack.setLnaGain(app.hackLna);
-        app.hack.setVgaGain(app.hackVga);
-        app.hack.setAmpEnable(app.hackAmp);
-        app.hack.setBiasTee(app.hackBias);
-        app.hack.setDcBlock(app.dcBlock);
-        ok = app.hack.start(app.deviceIndex, cb, err);
-    }
-#ifdef HAS_AIRSPY
-    else if (app.sourceMode == 5)
-    {
-        app.active = &app.airspy;
-        app.airspy.setSampleRate(kAirspyRates[app.airspySampleRateIdx]);
-        app.airspy.setCenterFreq(app.centerFreqMHz * 1e6);
-        app.airspy.setGainMode(app.airspyGainMode);
-        app.airspy.setSenseGain(app.airspySenseGain);
-        app.airspy.setLinearGain(app.airspyLinearGain);
-        app.airspy.setLnaGain(app.airspyLnaGain);
-        app.airspy.setMixerGain(app.airspyMixerGain);
-        app.airspy.setVgaGain(app.airspyVgaGain);
-        app.airspy.setLnaAgc(app.airspyLnaAgc);
-        app.airspy.setMixerAgc(app.airspyMixerAgc);
-        app.airspy.setBiasTee(app.airspyBias);
-        app.airspy.setDcBlock(app.dcBlock);
-        ok = app.airspy.start(app.deviceIndex, cb, err);
-    }
-#endif
-#ifdef HAS_LIBRESDR
-    else if (app.sourceMode == 6)
-    {
-        app.active = &app.libre;
-        app.libre.setFpgaImage(app.libreFpgaPath);
-        app.libre.setSampleRate(app.libreSampleRateMHz * 1e6);
-        app.libre.setCenterFreq(app.centerFreqMHz * 1e6);
-        app.libre.setGain((double)app.libreGainDb);
-        app.libre.setAntenna(app.libreAntenna);
-        app.libre.setDcBlock(app.dcBlock);
-        ok = app.libre.start(app.deviceIndex, cb, err);
-    }
-#endif
 
     if (ok)
     {

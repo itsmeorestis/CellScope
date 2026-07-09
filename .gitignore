@@ -1,2 +1,9 @@
 /build/
 /RESOURCES/
+
+# AI/BMAD tooling — kept locally, not shared
+/.agents/
+/.claude/
+/.opencode/
+/_bmad/
+/_bmad-output/
