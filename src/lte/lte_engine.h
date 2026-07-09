@@ -28,10 +28,14 @@ struct CellInfo {
     int    pci       = -1;   // physical cell id (0..503)
     int    nof_prb   = 0;    // bandwidth in PRB (6/15/25/50/75/100)
     int    nof_ports = 0;    // # of antenna ports at the eNB
-    double cfo_hz    = 0.0;  // carrier frequency offset estimate
+    double cfo_hz    = 0.0;  // carrier frequency offset estimate (live during decode)
     float  peak      = 0.0f; // correlation peak (search confidence)
     double freq_mhz  = 0.0;  // center frequency it was found at
     int    sfn       = -1;   // last decoded system frame number
+    double decode_rate_hz = 0.0; // sample rate this cell needs to decode fully
+    bool   bw_limited     = false; // true if decode_rate_hz exceeds the SDR input
+                                   // rate: only the center is captured, so PDCCH
+                                   // (hence all traffic) cannot be recovered
     // ---- from SIB1 (broadcast, plaintext) ----
     bool        have_sib = false;
     std::string plmn;        // "MCC-MNC", e.g. "310-260"

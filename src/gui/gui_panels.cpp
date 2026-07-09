@@ -92,34 +92,10 @@ void drawControls(App& app)
     bool running = app.active->running();
     bool starting = app.starting.load();
 
-    ImGui::BeginDisabled(running || starting);
-    {
-        // Explicit (label, mode) pairs so indices stay stable regardless of
-        // which optional backends are compiled in.
-        struct SrcOpt { const char* label; int mode; };
-        static const SrcOpt opts[] = {
-            {"RTL-SDR", 0}, {"WAV file", 1}, {"SDR++ Server", 2},
-            {"HackRF", 3}, {"Dual RTL", 4},
-#ifdef HAS_AIRSPY
-            {"Airspy", 5},
-#endif
-#ifdef HAS_LIBRESDR
-            {"LibreSDR", 6},
-#endif
-        };
-        const int nOpts = (int)(sizeof(opts) / sizeof(opts[0]));
-        const char* cur = "RTL-SDR";
-        for (int i = 0; i < nOpts; ++i)
-            if (opts[i].mode == app.sourceMode) cur = opts[i].label;
-        if (ImGui::BeginCombo(_L("Source"), cur))
-        {
-            for (int i = 0; i < nOpts; ++i)
-                if (ImGui::Selectable(opts[i].label, opts[i].mode == app.sourceMode))
-                    app.sourceMode = opts[i].mode;
-            ImGui::EndCombo();
-        }
-    }
-    ImGui::EndDisabled();
+    // CellScope is RTL-SDR only. Force the source mode so any stale value from a
+    // saved config can't select a removed backend.
+    app.sourceMode = 0;
+    ImGui::LabelText(_L("Source"), "RTL-SDR");
 
     ImGui::Separator();
 
@@ -1436,6 +1412,7 @@ void drawLte(App& app)
             cfg.nof_rx_antennas      = 1;
             app.lteEngine.start(cfg);
             app.lteRunning = true;
+            app.lteLastCenterT = -1000.0; // allow immediate re-center on new cell
         }
         ImGui::EndDisabled();
         if (!srcRunning)
@@ -1463,7 +1440,8 @@ void drawLte(App& app)
     ImGui::Text("State: %s", stateStr);
 
     lte::CellInfo ci;
-    if (app.lteEngine.cell(ci))
+    const bool haveCell = app.lteEngine.cell(ci);
+    if (haveCell)
     {
         ImGui::SameLine();
         ImGui::TextDisabled("| PCI %d  %d PRB  %d ports  SFN %d  %.3f MHz",
@@ -1479,6 +1457,72 @@ void drawLte(App& app)
                            ci.barred ? "   [BARRED]" : "");
     }
     ImGui::TextWrapped("%s", app.lteEngine.statusText().c_str());
+
+    // ---- Bandwidth-limit warning ----------------------------------------
+    // A cell wider than the SDR capture will lock (center 6 PRB carry PSS/SSS/MIB)
+    // but yields no traffic: PDCCH spans the whole carrier and cannot be recovered.
+    // Say so loudly instead of leaving the user staring at "0 UEs".
+    if (haveCell && ci.bw_limited)
+    {
+        double capMHz = (app.active ? app.active->sampleRate() : 0.0) / 1e6;
+        ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
+                           "Width-limited: cell %d PRB (%.1f MHz) > %.1f MHz capture - "
+                           "decoding captured center only (partial).",
+                           ci.nof_prb, ci.decode_rate_hz / 1e6, capMHz);
+    }
+
+    // ---- Auto-center: fold the cell CFO into the RTL PPM correction ----
+    // Only meaningful for the RTL source (PPM correction path). A cheap dongle's
+    // oscillator can be tens of ppm off; at ~763 MHz that is tens of kHz, several
+    // LTE subcarriers, which exceeds srsRAN's tracking range and makes the cell
+    // lock drop and re-acquire ("random retries"). Applying the measured offset as
+    // a PPM correction retunes the hardware so the cell lands near DC.
+    if (app.sourceMode == 0 || app.sourceMode == 4)
+    {
+        // delta_ppm = cfo_hz / center_hz * 1e6 == cfo_hz / freq_mhz. Positive CFO
+        // (cell above center) needs a positive correction to tune higher, moving
+        // the cell toward DC. Added to the existing PPM so it composes with any
+        // manual value and persists across retunes.
+        auto applyCenter = [&](double cfo_hz, double freq_mhz) {
+            if (freq_mhz <= 0.0)
+                return;
+            app.ppm += (float)(cfo_hz / freq_mhz);
+            app.sdr.setPpm((double)app.ppm);
+            app.lteLastCenterT = ImGui::GetTime();
+        };
+
+        const double nowT = ImGui::GetTime();
+
+        // Centering is only useful on a decodable cell. On a bandwidth-limited
+        // (too-wide) cell srsRAN's sync is marginal and its CFO estimate is noisy,
+        // so acting on it just thrashes the tuner -- disable both paths there.
+        const bool canCenter = haveCell && !ci.bw_limited;
+
+        // Manual: available on a decodable cell. ci.cfo_hz is the live tracked
+        // offset (published each second by the decode loop).
+        ImGui::BeginDisabled(!canCenter);
+        if (ImGui::Button("Center now"))
+            applyCenter(ci.cfo_hz, ci.freq_mhz);
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::Checkbox("Auto-center", &app.lteAutoCenter);
+        if (haveCell)
+        {
+            ImGui::SameLine();
+            ImGui::TextDisabled("CFO %.0f Hz (%.1f ppm)", ci.cfo_hz,
+                                ci.freq_mhz > 0 ? ci.cfo_hz / ci.freq_mhz : 0.0);
+        }
+
+        // Auto: re-center as the offset drifts, but only on a decodable cell, only
+        // when it exceeds ~1 kHz, and at most once every 5 s. Retuning briefly
+        // disturbs the lock, so the cooldown both prevents oscillation and lets
+        // srsRAN's own CFO tracking settle between hardware corrections.
+        if (app.lteAutoCenter && canCenter &&
+            std::fabs(ci.cfo_hz) > 1000.0 && (nowT - app.lteLastCenterT) > 5.0)
+        {
+            applyCenter(ci.cfo_hz, ci.freq_mhz);
+        }
+    }
 
     // ---- Cell-wide DL throughput + active-UE count over time ----
     auto hist = app.lteEngine.history();

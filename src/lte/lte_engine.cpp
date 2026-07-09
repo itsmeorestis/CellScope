@@ -62,13 +62,43 @@ struct DecimFir {
         if (D < 1) {
             D = 1;
         }
-        if (D == 1) {
-            h.clear();
-            return; // no decimation needed; resample_arb handles it
+
+        // Anti-alias cutoff (cycles/sample of input) and tap count. Two cases:
+        //   D >= 2: prefilter for the integer decimation, cutoff just under the
+        //           decimated Nyquist (0.45/D).
+        //   D == 1: no samples are dropped, BUT stage 2 (srsran_resample_arb) may
+        //           still be a fractional DOWNsample (e.g. RTL 2.4 -> 1.92 MHz,
+        //           ratio 1.25 rounds to D=1). The arb resampler has no anti-alias
+        //           filter, so energy above the output Nyquist folds onto the
+        //           PDCCH subcarriers -- robust PBCH survives but PDCCH decode
+        //           fails (0 DCIs). Low-pass at the output Nyquist here. When
+        //           D == 1 and out >= in (unity/upsample) there is no aliasing,
+        //           so skip the filter and let resample_arb handle it.
+        double fc;
+        int    ntaps;
+        if (D >= 2) {
+            ntaps = 8 * D + 1;      // more taps for larger ratios
+            fc    = 0.45 / D;
+        } else {
+            const double ratio = out_rate / in_rate; // < 1 when downsampling
+            if (ratio >= 0.999) {
+                h.clear();
+                return; // unity or upsample: no aliasing; resample_arb handles it
+            }
+            fc = 0.45 * ratio; // just under the output Nyquist
+            // Hamming transition width ~= 3.3/M (normalized to input fs); size
+            // the filter to the guard band between fc and Nyquist.
+            const double tw = std::max(0.02, ratio * 0.5 - fc);
+            ntaps = (int)std::ceil(3.3 / tw);
+            if (ntaps < 17) {
+                ntaps = 17;
+            }
+            if ((ntaps & 1) == 0) {
+                ntaps++; // odd -> symmetric with integer group delay
+            }
         }
-        const int ntaps = 8 * D + 1;      // more taps for larger ratios
-        const int M      = ntaps - 1;
-        const double fc  = 0.45 / D;       // cutoff (cycles/sample of input) just under out-Nyquist
+
+        const int M = ntaps - 1;
         h.resize(ntaps);
         double sum = 0.0;
         for (int i = 0; i < ntaps; ++i) {
@@ -123,10 +153,17 @@ struct LteEngine::Impl {
     // Two-stage resampling input_rate -> 1.92 MHz:
     //   1) DecimFir integer decimation (anti-aliased) by D
     //   2) srsran_resample_arb for the fractional residual (ratio ~1)
+    // Guards all resampler state (decim, resampler, decim_out, resample_out,
+    // cfg_out_rate, resample_bypass). push_resampled() runs on the external SDR
+    // capture thread while start()/configure_resampler() can reinitialize this
+    // state from the GUI thread; without this lock a restart mid-stream races
+    // the vector reallocations and corrupts memory.
+    mutable std::mutex        resamp_mtx;
     DecimFir                  decim;
     std::vector<cf_t>         decim_out;
     srsran_resample_arb_t     resampler{};
     bool                      resample_bypass = false;
+    double                    resample_ratio  = 1.0; // out/inter; sizes resample_out
     std::vector<cf_t>         resample_out;
     // Output rate the resampler currently targets (SDR-thread owned) and the
     // rate the worker wants (1.92 MHz for search, cell rate for decode).
@@ -220,14 +257,15 @@ struct LteEngine::Impl {
         return (int)nsamples;
     }
 
-    // Configure the two-stage resampler for a given output rate. SDR-thread
-    // owned (also called once from start() before the worker begins).
+    // Configure the two-stage resampler for a given output rate. Caller MUST
+    // hold resamp_mtx (push_resampled holds it; start() acquires it explicitly).
     void configure_resampler(double out_rate)
     {
         decim.init(cfg.input_sample_rate_hz, out_rate);
         const double inter = cfg.input_sample_rate_hz / (double)decim.D;
         const double rate  = out_rate / inter;
         resample_bypass    = (rate > 0.999 && rate < 1.001);
+        resample_ratio     = rate;
         if (!resample_bypass) {
             srsran_resample_arb_init(&resampler, (float)rate, false);
         }
@@ -237,6 +275,9 @@ struct LteEngine::Impl {
 
     void push_resampled(const cf_t* in, int n_in)
     {
+        // Serialize the whole resample against start()/configure_resampler().
+        std::lock_guard<std::mutex> rlk(resamp_mtx);
+
         // Reconfigure if the worker changed the target rate (search -> decode).
         double tr = target_rate.load();
         if (tr != cfg_out_rate) {
@@ -245,10 +286,14 @@ struct LteEngine::Impl {
             ring.clear();
         }
 
-        // Stage 1: anti-aliased integer decimation.
+        // Stage 1: anti-aliased decimation / prefilter. Runs whenever init()
+        // built a filter -- for D >= 2 (integer decimation) AND for the D == 1
+        // fractional-downsample case (e.g. 2.4 -> 1.92 MHz), where process()
+        // emits one filtered sample per input (no sample dropping) so the arb
+        // resampler downstream sees a band-limited signal.
         const cf_t* stage = in;
         int         ns    = n_in;
-        if (decim.D > 1) {
+        if (!decim.h.empty()) {
             decim_out.clear();
             decim.process(in, n_in, decim_out);
             stage = decim_out.data();
@@ -262,8 +307,14 @@ struct LteEngine::Impl {
         const cf_t* src = stage;
         int         n   = ns;
         if (!resample_bypass) {
-            if ((int)resample_out.size() < ns * 2 + 64) {
-                resample_out.resize(ns * 2 + 64);
+            // srsran_resample_arb_compute writes ~ns*ratio samples. Size by the
+            // ACTUAL ratio (plus margin) -- when decoding a wide cell the target
+            // rate can be several times the input rate (e.g. 50 PRB = 15.36 MHz
+            // from a 2.88 MHz RTL, ratio 5.3), and the old fixed ns*2+64 bound
+            // overflowed the buffer and corrupted the heap.
+            const size_t need = (size_t)std::ceil(ns * resample_ratio) + 64;
+            if (resample_out.size() < need) {
+                resample_out.resize(need);
             }
             n   = srsran_resample_arb_compute(&resampler, (cf_t*)stage, resample_out.data(), ns);
             src = resample_out.data();
@@ -647,38 +698,58 @@ bool LteEngine::Impl::decode_mib(CellInfo& io)
 
 void LteEngine::Impl::run_worker()
 {
-    st.store(EngineState::Searching);
-    // Keep the informative status set by start() (input rate / decimation).
-
-    CellInfo info;
-    int attempts = 0;
+    // Outer loop: acquire a cell, decode it, and on sustained sync loss fall back
+    // here to re-acquire. Previously run_decode spun forever once sync was lost,
+    // so a brief fade/CFO-drift dropped decode permanently until the user stopped.
     while (run.load()) {
-        if (!search_cell(info)) {
-            set_status("Searching for cell... (attempt " + std::to_string(++attempts) + ")");
-            continue; // keep scanning as more IQ streams in
-        }
-        set_status("Cell PCI " + std::to_string(info.pci) + " found, decoding MIB...");
+        int attempts = 0; // reset per re-acquisition cycle
+        st.store(EngineState::Searching);
+        // Search + MIB run at the 1.92 MHz cell-search rate; run_decode retunes
+        // the pipeline to the cell rate, so reset it before (re-)searching.
+        target_rate.store(SRSRAN_CS_SAMP_FREQ);
 
-        if (decode_mib(info)) {
-            {
-                std::lock_guard<std::mutex> lk(cell_mtx);
-                cell_info = info;
-                have_cell = true;
+        CellInfo info;
+        bool     found = false;
+        while (run.load()) {
+            if (!search_cell(info)) {
+                ++attempts;
+                // After sustained failures, hint that this may not be LTE at all.
+                // CellScope decodes LTE only; a strong carrier here with no PSS/SSS
+                // is most likely 5G NR (different PHY, not decodable) or non-cellular.
+                if (attempts >= 5) {
+                    set_status("No LTE cell found (attempt " + std::to_string(attempts) +
+                               "). If a carrier is present it is likely 5G NR or non-LTE "
+                               "— not decodable by CellScope.");
+                } else {
+                    set_status("Searching for cell... (attempt " + std::to_string(attempts) + ")");
+                }
+                continue; // keep scanning as more IQ streams in
             }
-            st.store(EngineState::CellFound);
-            set_status("Cell PCI " + std::to_string(info.pci) + ", " +
-                       std::to_string(info.nof_prb) + " PRB, " +
-                       std::to_string(info.nof_ports) + " ports");
-            break;
-        }
-        set_status("MIB decode failed, re-searching...");
-    }
+            set_status("Cell PCI " + std::to_string(info.pci) + " found, decoding MIB...");
 
-    // ---- DECODE PHASE ----
-    // Cell known: switch the input pipeline to the cell's sample rate and run
-    // the PDCCH blind-search + PDSCH decode loop (FALCON + LTESniffer core).
-    if (run.load() && st.load() == EngineState::CellFound) {
-        run_decode(info);
+            if (decode_mib(info)) {
+                {
+                    std::lock_guard<std::mutex> lk(cell_mtx);
+                    cell_info = info;
+                    have_cell = true;
+                }
+                st.store(EngineState::CellFound);
+                set_status("Cell PCI " + std::to_string(info.pci) + ", " +
+                           std::to_string(info.nof_prb) + " PRB, " +
+                           std::to_string(info.nof_ports) + " ports");
+                found = true;
+                break;
+            }
+            set_status("MIB decode failed, re-searching...");
+        }
+
+        // ---- DECODE PHASE ----
+        // Switch the input pipeline to the cell's sample rate and run the
+        // PDCCH blind-search + PDSCH decode loop (FALCON + LTESniffer core).
+        // Returns on stop OR sustained sync loss -> loop re-acquires.
+        if (run.load() && found) {
+            run_decode(info);
+        }
     }
 }
 
@@ -837,6 +908,26 @@ void LteEngine::Impl::run_decode(CellInfo& ci)
         return;
     }
 
+    // Bandwidth check: a cell is decodable when the SDR captures its OCCUPIED
+    // bandwidth (nof_prb * 180 kHz), not srsRAN's oversampled nominal 'srate'.
+    // E.g. a 100-PRB cell occupies 18 MHz and decodes fine from a 20 Msps HackRF
+    // even though srate is 23.04 MHz; comparing against srate would wrongly flag
+    // it. If the input rate is below the occupied bandwidth we only capture the
+    // center of the carrier: PSS/SSS/MIB (center 6 PRB) still decode so the cell
+    // locks, but PDCCH spans the whole carrier and cannot be recovered -> 0 UEs.
+    const double occupied_hz = cell.nof_prb * 180e3;
+    const bool   bw_limited  = cfg.input_sample_rate_hz < occupied_hz;
+    {
+        std::lock_guard<std::mutex> lk(cell_mtx);
+        cell_info.decode_rate_hz = occupied_hz; // occupied bandwidth needed
+        cell_info.bw_limited     = bw_limited;
+    }
+    diagLog("run_decode bandwidth: prb=" + std::to_string(cell.nof_prb) +
+            " occupied=" + std::to_string((long long)occupied_hz) +
+            " srsran_srate=" + std::to_string(srate) +
+            " input_rate=" + std::to_string((long long)cfg.input_sample_rate_hz) +
+            (bw_limited ? " -> BANDWIDTH LIMITED (center only, no PDCCH)" : " -> ok"));
+
     // Switch the input pipeline to the cell's sample rate; the SDR thread
     // reconfigures the resampler and refills the ring at the new rate.
     target_rate.store((double)srate);
@@ -916,13 +1007,18 @@ void LteEngine::Impl::run_decode(CellInfo& ci)
     uint64_t       sf_cnt          = 0;
     int            decode_state    = 0; // 0 = re-acquire MIB/SFN, 1 = PDSCH
     uint64_t       last_status_ms  = now_ms();
+    uint64_t       last_sync_ms    = now_ms(); // last subframe sync; drives re-acquire
     {
         std::lock_guard<std::mutex> lk(ue_mtx);
         decode_start_ms = now_ms();
         last_rate_ms    = decode_start_ms;
+        // Clear the UE model too: it belongs to the cell we are (re-)acquiring,
+        // not a previous one. Without this the table kept showing stale UEs (and
+        // a stale count) after the cell changed or dropped out.
+        ues.clear();
+        prev_bytes.clear();
         history_pts.clear();
         conn_events.clear();
-        prev_bytes.clear();
         vtrack.clear();
         call_log.clear();
     }
@@ -967,6 +1063,7 @@ void LteEngine::Impl::run_decode(CellInfo& ci)
                 sfn = (sfn + 1) % 1024;
             }
             sf_cnt++;
+            last_sync_ms = now_ms(); // got a synced subframe
         }
       } catch (const std::exception& e) {
         diagLog(std::string("run_decode loop exception: ") + e.what());
@@ -978,16 +1075,39 @@ void LteEngine::Impl::run_decode(CellInfo& ci)
         uint64_t nowms = now_ms();
         if (nowms - last_status_ms > 1000) {
             update_rates();
+            // Publish the live tracked carrier offset (Hz) so the UI shows the
+            // real, current offset (not the coarse search-time value) and
+            // auto-center can track drift.
+            const double live_cfo = srsran_ue_sync_get_cfo(&ue_sync);
+            {
+                std::lock_guard<std::mutex> lk(cell_mtx);
+                cell_info.cfo_hz = live_cfo;
+            }
             size_t nue;
             {
                 std::lock_guard<std::mutex> lk(ue_mtx);
                 nue = ues.size();
             }
-            set_status("Decoding PCI " + std::to_string(cell.id) + ": " +
+            // Always report continuous decode progress. On a too-wide cell add a
+            // short "(partial)" note rather than replacing the status with a
+            // warning -- decode keeps running and recovers whatever lands in the
+            // captured center bandwidth.
+            set_status("Decoding PCI " + std::to_string(cell.id) +
+                       (bw_limited ? " (partial - width limited): " : ": ") +
                        std::to_string(nue) + " UEs, " + std::to_string(sf_cnt) + " subframes");
             diagLog("decode progress: " + std::to_string(nue) + " UEs, " +
-                    std::to_string(sf_cnt) + " subframes, sfn=" + std::to_string(sfn));
+                    std::to_string(sf_cnt) + " subframes, sfn=" + std::to_string(sfn) +
+                    ", cfo=" + std::to_string((int)live_cfo) + " Hz" +
+                    (bw_limited ? " [BW-LIMITED]" : ""));
             last_status_ms = nowms;
+
+            // Sustained loss of subframe sync (fade, CFO drift, stream glitch):
+            // bail out so run_worker re-acquires instead of spinning dead here.
+            if (nowms - last_sync_ms > 3000) {
+                diagLog("run_decode: no sync for >3s, re-acquiring cell");
+                set_status("Sync lost - re-acquiring cell...");
+                break;
+            }
         }
     }
 
@@ -1021,7 +1141,12 @@ void LteEngine::start(const EngineConfig& cfg)
 
     const double out_rate = SRSRAN_CS_SAMP_FREQ; // 1.92 MHz for search/MIB
     impl_->target_rate.store(out_rate);
-    impl_->configure_resampler(out_rate);
+    {
+        // Hold resamp_mtx: the SDR capture thread may still be inside
+        // push_resampled() from a prior session while we reinitialize here.
+        std::lock_guard<std::mutex> rlk(impl_->resamp_mtx);
+        impl_->configure_resampler(out_rate);
+    }
     {
         std::lock_guard<std::mutex> lk(impl_->ring_mtx);
         impl_->ring.clear();

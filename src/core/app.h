@@ -153,6 +153,11 @@ struct App
     char   lteTrafficFilter[64] = "";   // filter Traffic by RNTI/text
     bool   lteTrafficWatchedOnly = false;
     bool   lteUeCallsOnly        = false; // show only UEs on a detected call
+    // Auto-center: fold the decoded cell's live carrier-frequency offset back into
+    // the RTL PPM correction so the cell stays within srsRAN's CFO tracking range
+    // (cheap dongles drift tens of ppm, which stalls LTE lock -> constant retries).
+    bool   lteAutoCenter  = false;   // continuously re-center as the offset drifts
+    double lteLastCenterT = -1000.0; // ImGui::GetTime() of last correction (cooldown)
 #endif
 
     std::vector<SdrDeviceInfo> devices;
